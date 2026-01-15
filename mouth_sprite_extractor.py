@@ -44,6 +44,9 @@ class MouthFrameInfo:
     height: float             # 口quadの高さ
     confidence: float         # 検出信頼度
     valid: bool               # 検出が有効か
+    mask: Optional[np.ndarray] = None  # SAM3マスク (H, W) uint8
+    bbox: Optional[Tuple[int, int, int, int]] = None  # 元のbbox
+    category: str = ""        # 自動分類カテゴリ (open/closed/half/e/u)
 
 
 @dataclass
@@ -165,6 +168,68 @@ def find_stable_position_cluster(
 # Mouth type selection
 # ---------------------------------------------------------------------------
 
+def classify_mouth_frames(
+    mouth_frames: List[MouthFrameInfo],
+    cluster_mask: np.ndarray,
+    candidates_per_category: int = 5,
+) -> Dict[str, List[MouthFrameInfo]]:
+    """
+    口フレームを5カテゴリに自動分類する。
+
+    Args:
+        mouth_frames: 全フレームの口情報
+        cluster_mask: 位置クラスタに属するフレームのマスク
+        candidates_per_category: 各カテゴリの候補数
+
+    Returns:
+        {"open": [...], "closed": [...], "half": [...], "e": [...], "u": [...]}
+    """
+    # クラスタ内の有効フレームのみを対象
+    candidates = [
+        mf for mf in mouth_frames
+        if mf.valid and cluster_mask[mf.frame_idx]
+    ]
+
+    if len(candidates) < 5:
+        candidates = [mf for mf in mouth_frames if mf.valid]
+
+    if len(candidates) == 0:
+        return {"open": [], "closed": [], "half": [], "e": [], "u": []}
+
+    # 各種メトリクス
+    heights = np.array([mf.height for mf in candidates])
+    widths = np.array([mf.width for mf in candidates])
+    aspect_ratios = widths / np.maximum(heights, 1e-6)
+
+    # 各カテゴリのスコアを計算
+    median_height = np.median(heights)
+
+    # スコア計算
+    open_scores = heights  # 高さが大きいほど高スコア
+    closed_scores = -heights  # 高さが小さいほど高スコア
+    half_scores = -np.abs(heights - median_height)  # 中央に近いほど高スコア
+    e_scores = aspect_ratios  # 横長ほど高スコア
+    u_scores = -widths - 0.5 * np.abs(heights - median_height)  # 幅小さく高さ中央
+
+    def get_top_n(scores: np.ndarray, n: int, category: str) -> List[MouthFrameInfo]:
+        """上位n件を取得"""
+        sorted_indices = np.argsort(scores)[::-1]
+        result = []
+        for idx in sorted_indices[:n]:
+            mf = candidates[idx]
+            mf.category = category
+            result.append(mf)
+        return result
+
+    return {
+        "open": get_top_n(open_scores, candidates_per_category, "open"),
+        "closed": get_top_n(closed_scores, candidates_per_category, "closed"),
+        "half": get_top_n(half_scores, candidates_per_category, "half"),
+        "e": get_top_n(e_scores, candidates_per_category, "e"),
+        "u": get_top_n(u_scores, candidates_per_category, "u"),
+    }
+
+
 def select_5_mouth_types(
     mouth_frames: List[MouthFrameInfo],
     cluster_mask: np.ndarray,
@@ -285,18 +350,49 @@ def extract_mouth_sprite(
     unified_h: int,
     feather_px: int = 15,
     mask_scale: float = 0.85,
+    sam_mask: Optional[np.ndarray] = None,
+    use_sam_mask: bool = False,
+    mask_dilate: int = 0,
 ) -> np.ndarray:
     """
     フレームから口スプライトを抽出する。
+
+    Args:
+        frame_bgr: 入力フレーム（BGR）
+        quad: 口のquad (4, 2)
+        unified_w: 出力幅
+        unified_h: 出力高さ
+        feather_px: フェザー幅
+        mask_scale: 楕円マスクのスケール
+        sam_mask: SAM3が生成したマスク（元画像サイズ）
+        use_sam_mask: SAM3マスクを使用するか
+        mask_dilate: マスクの膨張/収縮ピクセル数（正:膨張、負:収縮）
 
     Returns:
         bgra: (H, W, 4) uint8 - 透過PNG用
     """
     patch = warp_frame_to_norm(frame_bgr, quad, unified_w, unified_h)
 
-    rx = int((unified_w * mask_scale) * 0.5)
-    ry = int((unified_h * mask_scale) * 0.5)
-    mask_u8 = make_ellipse_mask(unified_w, unified_h, rx, ry)
+    if use_sam_mask and sam_mask is not None:
+        # SAM3マスクを使用
+        # マスクをquadの領域に合わせて変換
+        mask_u8 = warp_mask_to_norm(sam_mask, quad, unified_w, unified_h)
+
+        # 膨張/収縮を適用
+        if mask_dilate != 0:
+            kernel_size = abs(mask_dilate) * 2 + 1
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
+            )
+            if mask_dilate > 0:
+                mask_u8 = cv2.dilate(mask_u8, kernel)
+            else:
+                mask_u8 = cv2.erode(mask_u8, kernel)
+    else:
+        # 楕円マスクを使用
+        rx = int((unified_w * mask_scale) * 0.5)
+        ry = int((unified_h * mask_scale) * 0.5)
+        mask_u8 = make_ellipse_mask(unified_w, unified_h, rx, ry)
 
     mask_f = feather_mask(mask_u8, feather_px)
 
@@ -305,6 +401,35 @@ def extract_mouth_sprite(
     bgra[:, :, 3] = (mask_f * 255).astype(np.uint8)
 
     return bgra
+
+
+def warp_mask_to_norm(
+    mask: np.ndarray,
+    quad: np.ndarray,
+    norm_w: int,
+    norm_h: int,
+) -> np.ndarray:
+    """SAM3マスクをquadの領域に合わせて正規化空間に変換"""
+    src = np.asarray(quad, dtype=np.float32).reshape(4, 2)
+    dst = np.array([
+        [0, 0],
+        [norm_w - 1, 0],
+        [norm_w - 1, norm_h - 1],
+        [0, norm_h - 1],
+    ], dtype=np.float32)
+
+    M = cv2.getPerspectiveTransform(src, dst)
+    warped = cv2.warpPerspective(
+        mask,
+        M,
+        (int(norm_w), int(norm_h)),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+
+    # 二値化
+    return (warped > 127).astype(np.uint8) * 255
 
 
 def compute_unified_size(
@@ -457,6 +582,8 @@ class MouthSpriteExtractor:
                     height=float(bbox[3] - bbox[1]),
                     confidence=1.0,
                     valid=True,
+                    mask=mask,  # SAM3マスクを保存
+                    bbox=bbox,  # 元のbboxを保存
                 )
                 self.mouth_frames.append(mf)
 
