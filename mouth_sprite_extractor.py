@@ -10,7 +10,7 @@ SAM3を使用して動画から口スプライト（5種類のPNG）を自動抽
 2. 5種類の口形状を自動選別（open, closed, half, e, u）
 3. 楕円マスク＋フェザーで透過PNG出力
 
-License: MIT
+License: AGPL-3.0 (Ultralyticsライセンスに準拠)
 Note: SAM3モデルの使用にはMeta SAM Licenseが適用されます。
 """
 
@@ -88,6 +88,38 @@ def ensure_even_ge2(n: int) -> int:
     if n < 2:
         return 2
     return n if (n % 2 == 0) else (n - 1)
+
+
+def adjust_quad(
+    quad: np.ndarray,
+    offset_x: float = 0.0,
+    offset_y: float = 0.0,
+    scale: float = 1.0,
+) -> np.ndarray:
+    """
+    quadに微調整を適用する。
+
+    Args:
+        quad: (4, 2) float32 配列
+        offset_x: X方向のオフセット（ピクセル）
+        offset_y: Y方向のオフセット（ピクセル）
+        scale: スケール係数（1.0 = 元のサイズ）
+
+    Returns:
+        調整後のquad
+    """
+    quad = quad.copy()
+
+    # オフセットを適用
+    quad[:, 0] += offset_x
+    quad[:, 1] += offset_y
+
+    # スケールを適用（中心を基準に拡大/縮小）
+    if scale != 1.0:
+        center = quad.mean(axis=0)
+        quad = center + (quad - center) * scale
+
+    return quad
 
 
 # ---------------------------------------------------------------------------
@@ -415,7 +447,7 @@ class MouthSpriteExtractor:
 
             if result is not None:
                 mask, bbox, center = result
-                quad = bbox_to_quad(bbox, sprite_aspect=1.5)
+                quad = bbox_to_quad(bbox)  # 元のアスペクト比を維持
 
                 mf = MouthFrameInfo(
                     frame_idx=frame_idx,

@@ -213,14 +213,14 @@ def mask_to_bbox(mask: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
 
 def bbox_to_quad(
     bbox: Tuple[int, int, int, int],
-    sprite_aspect: float = 1.0,
+    sprite_aspect: float = 0.0,
 ) -> np.ndarray:
     """
     bboxからquad（4点）を生成する。
 
     Args:
         bbox: (x_min, y_min, x_max, y_max)
-        sprite_aspect: スプライトのアスペクト比 (w/h)
+        sprite_aspect: スプライトのアスペクト比 (w/h)。0以下の場合は元のアスペクト比を維持。
 
     Returns:
         quad: (4, 2) float32 配列 [TL, TR, BR, BL]
@@ -231,7 +231,7 @@ def bbox_to_quad(
     w = x_max - x_min
     h = y_max - y_min
 
-    # アスペクト比を調整
+    # アスペクト比を調整（sprite_aspect > 0 の場合のみ）
     if sprite_aspect > 0:
         current_aspect = w / max(1, h)
         if current_aspect > sprite_aspect:

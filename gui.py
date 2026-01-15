@@ -5,7 +5,7 @@ gui.py
 
 SAM3を使用した口スプライト抽出GUI。
 
-License: MIT
+License: AGPL-3.0 (Ultralyticsライセンスに準拠)
 Note: SAM3モデルの使用にはMeta SAM Licenseが適用されます。
 """
 
@@ -53,6 +53,7 @@ from mouth_sprite_extractor import (
     feather_mask,
     ensure_even_ge2,
     extract_mouth_sprite,
+    adjust_quad,
 )
 
 
@@ -71,13 +72,34 @@ DEFAULT_FEATHER = 15
 MAX_FEATHER = 50
 DEFAULT_PADDING = 0.3
 
+# Fine-tuning defaults
+DEFAULT_OFFSET_X = 0
+DEFAULT_OFFSET_Y = 0
+DEFAULT_SCALE = 1.0
+MAX_OFFSET = 100
+MIN_SCALE = 0.5
+MAX_SCALE = 2.0
+
 
 # ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
 
-def numpy_to_photoimage(bgra: np.ndarray, size: int) -> Optional["ImageTk.PhotoImage"]:
-    """numpy配列をPhotoImageに変換"""
+def numpy_to_photoimage(
+    bgra: np.ndarray,
+    max_size: int,
+    keep_aspect: bool = True,
+) -> Optional["ImageTk.PhotoImage"]:
+    """numpy配列をPhotoImageに変換
+
+    Args:
+        bgra: 入力画像（BGR/BGRA）
+        max_size: 最大サイズ（幅または高さの大きい方）
+        keep_aspect: アスペクト比を維持するか（デフォルト: True）
+
+    Returns:
+        PhotoImage または None
+    """
     if not _HAS_PIL:
         return None
     try:
@@ -85,7 +107,20 @@ def numpy_to_photoimage(bgra: np.ndarray, size: int) -> Optional["ImageTk.PhotoI
             img = Image.fromarray(cv2.cvtColor(bgra, cv2.COLOR_BGRA2RGBA))
         else:
             img = Image.fromarray(cv2.cvtColor(bgra, cv2.COLOR_BGR2RGB))
-        img = img.resize((size, size), Image.Resampling.LANCZOS)
+
+        if keep_aspect:
+            # アスペクト比を維持してリサイズ
+            w, h = img.size
+            if w >= h:
+                new_w = max_size
+                new_h = int(h * max_size / w)
+            else:
+                new_h = max_size
+                new_w = int(w * max_size / h)
+            img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        else:
+            img = img.resize((max_size, max_size), Image.Resampling.LANCZOS)
+
         return ImageTk.PhotoImage(img)
     except Exception:
         return None
@@ -216,6 +251,58 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         self.feather_label = ttk.Label(feather_frame, text=f"{DEFAULT_FEATHER}px", width=6)
         self.feather_label.pack(side=tk.LEFT)
 
+        # --- Fine-tuning frame ---
+        tuning_frame = ttk.LabelFrame(main_frame, text="口位置の微調整", padding=5)
+        tuning_frame.pack(fill=tk.X, pady=(0, 10))
+
+        # Offset X
+        offset_x_frame = ttk.Frame(tuning_frame)
+        offset_x_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(offset_x_frame, text="オフセットX:").pack(side=tk.LEFT)
+        self.offset_x_var = tk.IntVar(value=DEFAULT_OFFSET_X)
+        self.offset_x_slider = ttk.Scale(
+            offset_x_frame, from_=-MAX_OFFSET, to=MAX_OFFSET, orient=tk.HORIZONTAL,
+            variable=self.offset_x_var,
+        )
+        self.offset_x_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
+        self.offset_x_label = ttk.Label(offset_x_frame, text="0px", width=6)
+        self.offset_x_label.pack(side=tk.LEFT)
+
+        # Offset Y
+        offset_y_frame = ttk.Frame(tuning_frame)
+        offset_y_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(offset_y_frame, text="オフセットY:").pack(side=tk.LEFT)
+        self.offset_y_var = tk.IntVar(value=DEFAULT_OFFSET_Y)
+        self.offset_y_slider = ttk.Scale(
+            offset_y_frame, from_=-MAX_OFFSET, to=MAX_OFFSET, orient=tk.HORIZONTAL,
+            variable=self.offset_y_var,
+        )
+        self.offset_y_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
+        self.offset_y_label = ttk.Label(offset_y_frame, text="0px", width=6)
+        self.offset_y_label.pack(side=tk.LEFT)
+
+        # Scale
+        scale_frame = ttk.Frame(tuning_frame)
+        scale_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(scale_frame, text="スケール:").pack(side=tk.LEFT)
+        self.scale_var = tk.DoubleVar(value=DEFAULT_SCALE)
+        self.scale_slider = ttk.Scale(
+            scale_frame, from_=MIN_SCALE, to=MAX_SCALE, orient=tk.HORIZONTAL,
+            variable=self.scale_var,
+        )
+        self.scale_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
+        self.scale_label = ttk.Label(scale_frame, text="100%", width=6)
+        self.scale_label.pack(side=tk.LEFT)
+
+        # Reset button
+        reset_btn = ttk.Button(
+            tuning_frame, text="リセット", command=self._reset_fine_tuning
+        )
+        reset_btn.pack(anchor=tk.E, pady=(5, 0))
+
         # --- Analyze button ---
         self.analyze_btn = ttk.Button(
             main_frame, text="解析開始", command=self._on_analyze, state=tk.DISABLED
@@ -335,6 +422,12 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         self.padding_label.configure(text=f"{padding_pct}%")
         self.feather_label.configure(text=f"{self.feather_var.get()}px")
 
+        # Update fine-tuning labels
+        self.offset_x_label.configure(text=f"{self.offset_x_var.get()}px")
+        self.offset_y_label.configure(text=f"{self.offset_y_var.get()}px")
+        scale_pct = int(self.scale_var.get() * 100)
+        self.scale_label.configure(text=f"{scale_pct}%")
+
         self.after(100, self._poll_logs)
 
     def _append_log(self, msg: str):
@@ -347,6 +440,13 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
     def log(self, msg: str):
         """スレッドセーフなログ"""
         self.log_queue.put(msg)
+
+    def _reset_fine_tuning(self):
+        """微調整をリセット"""
+        self.offset_x_var.set(DEFAULT_OFFSET_X)
+        self.offset_y_var.set(DEFAULT_OFFSET_Y)
+        self.scale_var.set(DEFAULT_SCALE)
+        self.log("微調整をリセットしました")
 
     def _on_select_video(self):
         """動画ファイルを選択"""
@@ -532,6 +632,11 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         unified_w, unified_h = self.unified_size
         cap = self._get_video_capture()
 
+        # 微調整パラメータを取得
+        offset_x = self.offset_x_var.get()
+        offset_y = self.offset_y_var.get()
+        scale = self.scale_var.get()
+
         self.preview_sprites = {}
 
         for num, cand_idx in assignments.items():
@@ -543,8 +648,11 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
             if not ok or frame is None:
                 continue
 
+            # 微調整を適用したquadを使用
+            adjusted_quad = adjust_quad(mf.quad, offset_x, offset_y, scale)
+
             bgra = extract_mouth_sprite(
-                frame, mf.quad, unified_w, unified_h,
+                frame, adjusted_quad, unified_w, unified_h,
                 feather_px=feather_px
             )
 
