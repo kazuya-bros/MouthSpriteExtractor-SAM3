@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+mouth*/
+output*/
+
+# Test files
+test_*.png
+debug_*.png
+
+# HuggingFace cache
+.cache/
+
+# Model weights (download from HuggingFace)
+sam3.pt
+
+# uv lock file
+uv.lock
+
+# Temp files
+tmpclaude-*

@@ -1,0 +1,42 @@
+[project]
+name = "mouthspriteextractor-sam3"
+version = "0.1.0"
+description = "SAM3を使用した口スプライト自動抽出ツール"
+readme = "README.md"
+license = "AGPL-3.0"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=1.26.0,<2.0.0",
+    "opencv-python>=4.8.0",
+    "pillow>=10.0.0",
+    "ultralytics>=8.3.237",
+    "tkinterdnd2>=0.3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "pytest",
+]
+
+[tool.uv]
+# PyTorch with CUDA 12.6
+extra-index-url = ["https://download.pytorch.org/whl/cu126"]
+
+[tool.uv.sources]
+# PyTorchはCUDA版を優先
+torch = { index = "pytorch-cu126" }
+torchvision = { index = "pytorch-cu126" }
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
