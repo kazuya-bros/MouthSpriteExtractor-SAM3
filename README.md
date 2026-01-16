@@ -2,22 +2,18 @@
 
 SAM3 (Segment Anything Model 3) を使用して、動画から口スプライト（5種類のPNG）を自動抽出するツールです。
 
-[MotionPNGTuber](https://github.com/uezo/MotionPNGTuber) 向けの口パク素材作成に使用できます。
+[MotionPNGTuber](https://github.com/rotejin/MotionPNGTuber) 向けの口パク素材作成に使用できます。
 
 ## このプロジェクトについて
 
-本プロジェクトは、[MotionPNGTuber](https://github.com/uezo/MotionPNGTuber)（作者: ろてじん[@uezo](https://github.com/uezo)さん）の口スプライト抽出機能を、SAM3を使用して再実装したものです。
-
-オリジナルのMotionPNGTuberは `anime-face-detector` を使用していますが、Python 3.10が必要であり、新しいPython環境での利用が困難でした。本プロジェクトでは Ultralytics 経由で SAM3 を使用することで、Python 3.12以降での動作を可能にしています。
+本プロジェクトは、[MotionPNGTuber](https://github.com/rotejin/MotionPNGTuber)（作者: ろてじん[@rotejin](https://github.com/rotejin)さん）の口スプライト抽出機能を、SAM3を使用して再実装したものです。
 
 **なぜ別リポジトリなのか:**
 
-本来であればMotionPNGTuberにプルリクエストを送るべきところですが、以下の理由からやむを得ず別リポジトリとして公開しています：
+本来であればMotionPNGTuberにプルリクエストを送るべきところですが、以下の理由から別リポジトリとして公開しています：
 
-- **ライセンスの問題**: Ultralyticsパッケージを使用するとAGPL-3.0ライセンスが適用され、MotionPNGTuber本体（MITライセンス）のライセンス体系に影響を与える可能性がある
-- **依存関係の複雑さ**: SAM3モデルの取得にはHuggingFaceでのアクセス承認が必要であり、セットアップが複雑になる
-
-MotionPNGTuberの素晴らしい設計と実装に感謝いたします。
+1. **Windows対応の問題**: Meta公式のSAM3はTriton依存でWindowsで動作しないため、Ultralytics経由での利用が必要。しかしUltralyticsはPython 3.12以降を推奨しており、MotionPNGTuber（Python 3.10）と互換性がない
+2. **ライセンスの問題**: UltralyticsはAGPL-3.0ライセンスであり、MotionPNGTuber本体（MITライセンス）に影響を与える可能性がある
 
 ## 特徴
 
@@ -183,10 +179,10 @@ SAM3モデルの使用には[Meta SAM License](https://github.com/facebookresear
 
 ## 謝辞
 
-- **[ろてじん (@uezo)](https://github.com/uezo)** さん - [MotionPNGTuber](https://github.com/uezo/MotionPNGTuber) の作者。素晴らしいPNGTuberツールの設計と実装に感謝いたします
+- **[ろてじん (@rotejin)](https://github.com/rotejin)** さん - [MotionPNGTuber](https://github.com/rotejin/MotionPNGTuber) の作者。素晴らしいPNGTuberツールの設計と実装に感謝いたします
 - [Ultralytics](https://github.com/ultralytics/ultralytics) - SAM3のPython実装
 - [facebookresearch/sam3](https://github.com/facebookresearch/sam3) - SAM3モデル
 
 ## 関連プロジェクト
 
-- [MotionPNGTuber](https://github.com/uezo/MotionPNGTuber) - anime-face-detectorを使用した口スプライト抽出ツール（Python 3.10）。本プロジェクトのベースとなったツールです
+- [MotionPNGTuber](https://github.com/rotejin/MotionPNGTuber) - anime-face-detectorを使用した口スプライト抽出ツール（Python 3.10）。本プロジェクトのベースとなったツールです
