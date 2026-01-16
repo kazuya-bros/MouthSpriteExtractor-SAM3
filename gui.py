@@ -64,8 +64,8 @@ from mouth_sprite_extractor import (
 
 APP_TITLE = "Mouth Sprite Extractor (SAM3)"
 CANDIDATES_PER_CATEGORY = 5
-THUMB_SIZE = 80
-PREVIEW_SIZE = 120
+THUMB_SIZE = 64
+PREVIEW_SIZE = 100
 
 DEFAULT_FEATHER = 15
 MAX_FEATHER = 50
@@ -162,8 +162,8 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
-        self.geometry("1000x850")
-        self.minsize(900, 750)
+        self.geometry("1000x950")
+        self.minsize(900, 700)
 
         # State
         self.video_path: str = ""
@@ -297,6 +297,12 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         self.padding_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
         self.padding_label = ttk.Label(padding_frame, text="30%", width=5)
         self.padding_label.pack(side=tk.LEFT)
+
+        ttk.Label(
+            settings_frame,
+            text="パディング: 口の周囲に追加する余白（大きいほど広く切り抜き）",
+            foreground="gray", font=("", 8)
+        ).pack(fill=tk.X, pady=(0, 5))
 
         # Analyze button
         self.step1_btn = ttk.Button(
@@ -437,19 +443,11 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
             value="sam3", command=self._on_mask_type_changed
         ).pack(side=tk.LEFT, padx=5)
 
-        # Mask type description
-        self.mask_type_desc = ttk.Label(
-            settings_frame,
-            text="楕円マスク: シンプルな楕円形でくり抜き / SAM3マスク: AIが検出した口の形状でくり抜き",
-            foreground="gray", font=("", 8)
-        )
-        self.mask_type_desc.pack(fill=tk.X, pady=(0, 5))
-
-        # Feather
+        # Feather (with inline description)
         feather_frame = ttk.Frame(settings_frame)
         feather_frame.pack(fill=tk.X, pady=2)
 
-        ttk.Label(feather_frame, text="フェザー:").pack(side=tk.LEFT)
+        ttk.Label(feather_frame, text="フェザー:", width=10).pack(side=tk.LEFT)
         self.feather_var = tk.IntVar(value=DEFAULT_FEATHER)
         self.feather_slider = ttk.Scale(
             feather_frame, from_=0, to=MAX_FEATHER, orient=tk.HORIZONTAL,
@@ -458,18 +456,13 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         self.feather_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
         self.feather_label = ttk.Label(feather_frame, text=f"{DEFAULT_FEATHER}px", width=6)
         self.feather_label.pack(side=tk.LEFT)
-
-        ttk.Label(
-            settings_frame,
-            text="フェザー: マスクの境界をぼかす幅（大きいほどなめらかに合成）",
-            foreground="gray", font=("", 8)
-        ).pack(fill=tk.X, pady=(0, 5))
+        ttk.Label(feather_frame, text="(境界ぼかし)", foreground="gray", font=("", 8)).pack(side=tk.LEFT, padx=5)
 
         # Mask dilate (for SAM3 mask)
         self.dilate_frame = ttk.Frame(settings_frame)
         self.dilate_frame.pack(fill=tk.X, pady=2)
 
-        ttk.Label(self.dilate_frame, text="マスク膨張:").pack(side=tk.LEFT)
+        ttk.Label(self.dilate_frame, text="マスク膨張:", width=10).pack(side=tk.LEFT)
         self.dilate_var = tk.IntVar(value=DEFAULT_MASK_DILATE)
         self.dilate_slider = ttk.Scale(
             self.dilate_frame, from_=-MAX_MASK_DILATE, to=MAX_MASK_DILATE, orient=tk.HORIZONTAL,
@@ -478,29 +471,17 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         self.dilate_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
         self.dilate_label = ttk.Label(self.dilate_frame, text="0px", width=6)
         self.dilate_label.pack(side=tk.LEFT)
-
-        self.dilate_desc = ttk.Label(
-            settings_frame,
-            text="マスク膨張: SAM3マスクを広げる/縮める（+で広げる、-で縮める）※SAM3マスク選択時のみ有効",
-            foreground="gray", font=("", 8)
-        )
-        self.dilate_desc.pack(fill=tk.X, pady=(0, 5))
+        ttk.Label(self.dilate_frame, text="(SAM3時のみ)", foreground="gray", font=("", 8)).pack(side=tk.LEFT, padx=5)
 
         # Fine-tuning
-        tuning_frame = ttk.LabelFrame(frame, text="位置の微調整", padding=10)
-        tuning_frame.pack(fill=tk.X, pady=(0, 10))
-
-        ttk.Label(
-            tuning_frame,
-            text="検出位置がずれている場合に調整できます",
-            foreground="gray", font=("", 8)
-        ).pack(fill=tk.X, pady=(0, 5))
+        tuning_frame = ttk.LabelFrame(frame, text="位置の微調整（検出がずれている場合）", padding=5)
+        tuning_frame.pack(fill=tk.X, pady=(0, 5))
 
         # Offset X
         offset_x_frame = ttk.Frame(tuning_frame)
-        offset_x_frame.pack(fill=tk.X, pady=2)
+        offset_x_frame.pack(fill=tk.X, pady=1)
 
-        ttk.Label(offset_x_frame, text="オフセットX:").pack(side=tk.LEFT)
+        ttk.Label(offset_x_frame, text="X:", width=3).pack(side=tk.LEFT)
         self.offset_x_var = tk.IntVar(value=DEFAULT_OFFSET_X)
         self.offset_x_slider = ttk.Scale(
             offset_x_frame, from_=-MAX_OFFSET, to=MAX_OFFSET, orient=tk.HORIZONTAL,
@@ -509,18 +490,13 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         self.offset_x_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
         self.offset_x_label = ttk.Label(offset_x_frame, text="0px", width=6)
         self.offset_x_label.pack(side=tk.LEFT)
-
-        ttk.Label(
-            tuning_frame,
-            text="オフセットX: 切り抜き位置を左右にずらす（+で右、-で左）",
-            foreground="gray", font=("", 8)
-        ).pack(fill=tk.X, pady=(0, 5))
+        ttk.Label(offset_x_frame, text="(左右)", foreground="gray", font=("", 8)).pack(side=tk.LEFT, padx=5)
 
         # Offset Y
         offset_y_frame = ttk.Frame(tuning_frame)
-        offset_y_frame.pack(fill=tk.X, pady=2)
+        offset_y_frame.pack(fill=tk.X, pady=1)
 
-        ttk.Label(offset_y_frame, text="オフセットY:").pack(side=tk.LEFT)
+        ttk.Label(offset_y_frame, text="Y:", width=3).pack(side=tk.LEFT)
         self.offset_y_var = tk.IntVar(value=DEFAULT_OFFSET_Y)
         self.offset_y_slider = ttk.Scale(
             offset_y_frame, from_=-MAX_OFFSET, to=MAX_OFFSET, orient=tk.HORIZONTAL,
@@ -529,18 +505,13 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         self.offset_y_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
         self.offset_y_label = ttk.Label(offset_y_frame, text="0px", width=6)
         self.offset_y_label.pack(side=tk.LEFT)
-
-        ttk.Label(
-            tuning_frame,
-            text="オフセットY: 切り抜き位置を上下にずらす（+で下、-で上）",
-            foreground="gray", font=("", 8)
-        ).pack(fill=tk.X, pady=(0, 5))
+        ttk.Label(offset_y_frame, text="(上下)", foreground="gray", font=("", 8)).pack(side=tk.LEFT, padx=5)
 
         # Scale
         scale_frame = ttk.Frame(tuning_frame)
-        scale_frame.pack(fill=tk.X, pady=2)
+        scale_frame.pack(fill=tk.X, pady=1)
 
-        ttk.Label(scale_frame, text="スケール:").pack(side=tk.LEFT)
+        ttk.Label(scale_frame, text="倍率:", width=3).pack(side=tk.LEFT)
         self.scale_var = tk.DoubleVar(value=DEFAULT_SCALE)
         self.scale_slider = ttk.Scale(
             scale_frame, from_=MIN_SCALE, to=MAX_SCALE, orient=tk.HORIZONTAL,
@@ -549,12 +520,7 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         self.scale_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
         self.scale_label = ttk.Label(scale_frame, text="100%", width=6)
         self.scale_label.pack(side=tk.LEFT)
-
-        ttk.Label(
-            tuning_frame,
-            text="スケール: 切り抜き範囲を拡大/縮小（100%が元サイズ）",
-            foreground="gray", font=("", 8)
-        ).pack(fill=tk.X, pady=(0, 5))
+        ttk.Label(scale_frame, text="(拡大/縮小)", foreground="gray", font=("", 8)).pack(side=tk.LEFT, padx=5)
 
         # Preview button
         preview_btn_frame = ttk.Frame(frame)
@@ -796,7 +762,7 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         # 簡易的なカテゴリ選択ダイアログ
         dialog = tk.Toplevel(self)
         dialog.title("割り当て先を選択")
-        dialog.geometry("300x250")
+        dialog.geometry("320x320")
         dialog.transient(self)
         dialog.grab_set()
 
@@ -816,16 +782,67 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
             )
             btn.pack(fill=tk.X, padx=20, pady=2)
 
+        # 全体プレビューボタン
+        ttk.Separator(dialog, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=5)
+        ttk.Button(
+            dialog, text="全体フレームを表示",
+            command=lambda: self._show_full_frame_preview(selected_mf)
+        ).pack(fill=tk.X, padx=20, pady=2)
+
         ttk.Button(dialog, text="キャンセル", command=dialog.destroy).pack(pady=10)
+
+    def _show_full_frame_preview(self, mf: MouthFrameInfo):
+        """フレーム全体をプレビュー表示"""
+        cap = self._get_video_capture()
+        cap.set(cv2.CAP_PROP_POS_FRAMES, float(mf.frame_idx))
+        ok, frame = cap.read()
+
+        if not ok or frame is None:
+            messagebox.showerror("エラー", "フレームを読み込めませんでした")
+            return
+
+        # 口の位置を矩形で描画
+        frame_draw = frame.copy()
+        quad = mf.quad.astype(np.int32)
+        cv2.polylines(frame_draw, [quad], isClosed=True, color=(0, 255, 0), thickness=2)
+
+        # プレビューウィンドウ
+        preview_win = tk.Toplevel(self)
+        preview_win.title(f"フレーム {mf.frame_idx} - 全体プレビュー")
+
+        # 画面サイズに合わせてリサイズ
+        h, w = frame_draw.shape[:2]
+        max_size = 600
+        scale = min(max_size / w, max_size / h, 1.0)
+        if scale < 1.0:
+            new_w, new_h = int(w * scale), int(h * scale)
+            frame_draw = cv2.resize(frame_draw, (new_w, new_h))
+
+        preview_win.geometry(f"{frame_draw.shape[1]}x{frame_draw.shape[0] + 30}")
+
+        # 画像表示
+        photo = numpy_to_photoimage(frame_draw, frame_draw.shape[1])
+        if photo:
+            self._full_preview_photo = photo  # GC防止
+            lbl = ttk.Label(preview_win, image=photo)
+            lbl.pack()
+
+        ttk.Label(
+            preview_win,
+            text=f"カテゴリ: {mf.category} | サイズ: {mf.width:.0f}x{mf.height:.0f}",
+            foreground="gray"
+        ).pack()
 
     def _assign_to_category(self, mf: MouthFrameInfo, category: str, dialog: tk.Toplevel):
         """フレームをカテゴリに割り当て"""
         self.selected_frames[category] = mf
+        # 元のカテゴリ（どこから選んだか）を表示
+        source_cat = mf.category if mf.category else "?"
         self.selection_labels[category].configure(
-            text=f"選択中: フレーム {mf.frame_idx}",
+            text=f"選択中: フレーム {mf.frame_idx} (元: {source_cat})",
             foreground="green"
         )
-        self.log(f"{category}: フレーム {mf.frame_idx} を選択")
+        self.log(f"{category}: フレーム {mf.frame_idx} を選択 (元カテゴリ: {source_cat})")
 
         dialog.destroy()
         self._check_step2_complete()

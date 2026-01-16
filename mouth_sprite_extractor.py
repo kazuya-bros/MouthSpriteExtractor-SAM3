@@ -176,6 +176,9 @@ def classify_mouth_frames(
     """
     口フレームを5カテゴリに自動分類する。
 
+    各カテゴリでなるべく異なるフレームを選ぶようにする。
+    特にclosed/uやopen/half/eで同じフレームが選ばれにくくする。
+
     Args:
         mouth_frames: 全フレームの口情報
         cluster_mask: 位置クラスタに属するフレームのマスク
@@ -201,33 +204,79 @@ def classify_mouth_frames(
     widths = np.array([mf.width for mf in candidates])
     aspect_ratios = widths / np.maximum(heights, 1e-6)
 
-    # 各カテゴリのスコアを計算
     median_height = np.median(heights)
+    median_width = np.median(widths)
 
-    # スコア計算
-    open_scores = heights  # 高さが大きいほど高スコア
-    closed_scores = -heights  # 高さが小さいほど高スコア
-    half_scores = -np.abs(heights - median_height)  # 中央に近いほど高スコア
-    e_scores = aspect_ratios  # 横長ほど高スコア
-    u_scores = -widths - 0.5 * np.abs(heights - median_height)  # 幅小さく高さ中央
+    # 各カテゴリのスコア計算（特徴をより明確に分離）
+    # open: 高さが大きい（大きく開いた口）
+    open_scores = heights
 
-    def get_top_n(scores: np.ndarray, n: int, category: str) -> List[MouthFrameInfo]:
-        """上位n件を取得"""
-        sorted_indices = np.argsort(scores)[::-1]
-        result = []
-        for idx in sorted_indices[:n]:
-            mf = candidates[idx]
-            mf.category = category
-            result.append(mf)
-        return result
+    # closed: 高さが小さく、幅も小さめ（閉じた口）
+    closed_scores = -heights - 0.3 * widths
 
-    return {
-        "open": get_top_n(open_scores, candidates_per_category, "open"),
-        "closed": get_top_n(closed_scores, candidates_per_category, "closed"),
-        "half": get_top_n(half_scores, candidates_per_category, "half"),
-        "e": get_top_n(e_scores, candidates_per_category, "e"),
-        "u": get_top_n(u_scores, candidates_per_category, "u"),
+    # half: 高さが中央付近（半開き）
+    half_scores = -np.abs(heights - median_height)
+
+    # e: アスペクト比が大きい（横長）、ただしclosedとは異なり高さは中～大
+    e_scores = aspect_ratios + 0.3 * (heights - np.min(heights)) / (np.max(heights) - np.min(heights) + 1e-6)
+
+    # u: 幅が小さくて、高さは中央付近（すぼめた口）
+    # closedとの違い: 高さはある程度ある
+    height_normalized = (heights - np.min(heights)) / (np.max(heights) - np.min(heights) + 1e-6)
+    u_scores = -widths + 0.5 * np.abs(height_normalized - 0.5)
+
+    # 各カテゴリで上位候補を選ぶが、他のカテゴリで既に上位にいるものはペナルティ
+    all_scores = {
+        "open": open_scores,
+        "closed": closed_scores,
+        "half": half_scores,
+        "e": e_scores,
+        "u": u_scores,
     }
+
+    # カテゴリの処理順序（特徴が明確なものから）
+    category_order = ["open", "closed", "e", "u", "half"]
+
+    result: Dict[str, List[MouthFrameInfo]] = {}
+    used_count: Dict[int, int] = {}  # frame_idx -> 何回使われたか
+
+    for cat in category_order:
+        scores = all_scores[cat].copy()
+
+        # 既に多く使われているフレームにはペナルティ
+        for i, mf in enumerate(candidates):
+            count = used_count.get(mf.frame_idx, 0)
+            if count > 0:
+                # 使われた回数に応じてスコアを下げる
+                scores[i] -= count * 0.5 * np.std(scores)
+
+        sorted_indices = np.argsort(scores)[::-1]
+        selected = []
+
+        for idx in sorted_indices:
+            if len(selected) >= candidates_per_category:
+                break
+            mf = candidates[idx]
+            # このカテゴリに追加
+            mf_copy = MouthFrameInfo(
+                frame_idx=mf.frame_idx,
+                quad=mf.quad,
+                center=mf.center,
+                width=mf.width,
+                height=mf.height,
+                confidence=mf.confidence,
+                valid=mf.valid,
+                mask=mf.mask,
+                bbox=mf.bbox,
+                category=cat,
+            )
+            selected.append(mf_copy)
+            used_count[mf.frame_idx] = used_count.get(mf.frame_idx, 0) + 1
+
+        result[cat] = selected
+
+    # 元の順序で返す
+    return {cat: result[cat] for cat in ["open", "closed", "half", "e", "u"]}
 
 
 def select_5_mouth_types(
