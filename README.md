@@ -87,11 +87,13 @@ uv pip install -r requirements.txt
 huggingface-cli login
 ```
 
-4. `sam3.pt`をダウンロード:
+4. `sam3.pt`をプロジェクトルートにダウンロード:
 
 ```bash
 huggingface-cli download facebook/sam3 sam3.pt --local-dir .
 ```
+
+`sam3.pt`はプロジェクトのルートディレクトリ（`gui.py`と同じ場所）に配置してください。
 
 ## 使い方
 
