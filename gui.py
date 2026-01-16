@@ -5,8 +5,8 @@ gui.py
 
 SAM3を使用した口スプライト抽出GUI（2ステップ版・左右分割レイアウト）。
 
-STEP1-2: 動画選択・抽出・口選択（左右分割）
-STEP3: マスク調整・出力
+STEP1: 動画選択・抽出・口選択（左右分割）
+STEP2: マスク調整・出力
 
 License: AGPL-3.0 (Ultralyticsライセンスに準拠)
 Note: SAM3モデルの使用にはMeta SAM Licenseが適用されます。
@@ -66,7 +66,7 @@ APP_TITLE = "Mouth Sprite Extractor (SAM3)"
 INITIAL_CANDIDATES_PER_CATEGORY = 5
 MAX_CANDIDATES_PER_CATEGORY = 20
 THUMB_HEIGHT = 40  # サムネイルの高さ（アスペクト比維持）
-PREVIEW_MAX_SIZE = 400  # 右側プレビューの最大サイズ
+PREVIEW_MAX_SIZE = 350  # 右側プレビューの最大サイズ
 
 DEFAULT_FEATHER = 15
 MAX_FEATHER = 50
@@ -165,8 +165,8 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
-        self.geometry("1100x750")
-        self.minsize(1000, 650)
+        self.geometry("1100x700")
+        self.minsize(1000, 600)
 
         # State
         self.video_path: str = ""
@@ -247,13 +247,13 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # STEP1-2: 抽出・選択（左右分割）
+        # STEP1: 抽出・選択（左右分割）
         self.step12_frame = ttk.Frame(self.notebook)
-        self.notebook.add(self.step12_frame, text="STEP1-2: 抽出・選択")
+        self.notebook.add(self.step12_frame, text="STEP1: 抽出・選択")
 
-        # STEP3: 出力設定
+        # STEP2: 出力設定
         self.step3_frame = ttk.Frame(self.notebook)
-        self.notebook.add(self.step3_frame, text="STEP3: 出力")
+        self.notebook.add(self.step3_frame, text="STEP2: 出力")
 
         self._build_step12_ui()
         self._build_step3_ui()
@@ -304,6 +304,13 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
             top_frame, variable=self.progress_var, maximum=100, length=150
         )
         self.progress_bar.pack(side=tk.LEFT, padx=5)
+
+        # STEP2へボタン（右上に配置）
+        self.goto_step3_btn = ttk.Button(
+            top_frame, text="STEP2へ進む（必須項目を選択）",
+            command=self._goto_step3, state=tk.DISABLED
+        )
+        self.goto_step3_btn.pack(side=tk.RIGHT, padx=5)
 
         # Drag & drop
         if _HAS_TK_DND:
@@ -396,13 +403,6 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
                     command=lambda c=cat: self._clear_selection(c)
                 )
                 clear_btn.pack(side=tk.RIGHT)
-
-        # STEP3へボタン
-        self.goto_step3_btn = ttk.Button(
-            right_frame, text="STEP3へ進む（必須項目を選択してください）",
-            command=self._goto_step3, state=tk.DISABLED
-        )
-        self.goto_step3_btn.pack(fill=tk.X, pady=(10, 0))
 
     def _build_category_row(self, cat: str):
         """カテゴリ行を構築"""
@@ -779,16 +779,80 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         self._update_candidate_buttons_appearance()
 
     def _load_more_candidates(self, cat: str):
-        """候補を追加ロード"""
-        self.shown_candidates[cat] = min(
-            self.shown_candidates[cat] + 5,
-            MAX_CANDIDATES_PER_CATEGORY
-        )
+        """候補を追加ロード - 別ウィンドウで表示"""
+        frames = self.classified_frames.get(cat, [])
+        if not frames:
+            return
+
+        # 別ウィンドウを開く
+        self._open_candidate_window(cat, frames)
+
+    def _open_candidate_window(self, cat: str, frames: List[MouthFrameInfo]):
+        """カテゴリの全候補を別ウィンドウで表示"""
+        win = tk.Toplevel(self)
+        win.title(f"{cat.upper()} - 追加候補")
+        win.geometry("600x500")
+        win.transient(self)
+
+        # スクロール可能なキャンバス
+        canvas = tk.Canvas(win)
+        scrollbar_y = ttk.Scrollbar(win, orient=tk.VERTICAL, command=canvas.yview)
+        scrollbar_x = ttk.Scrollbar(win, orient=tk.HORIZONTAL, command=canvas.xview)
+        inner_frame = ttk.Frame(canvas)
+
+        canvas.configure(yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
+        scrollbar_y.pack(side=tk.RIGHT, fill=tk.Y)
+        scrollbar_x.pack(side=tk.BOTTOM, fill=tk.X)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        canvas.create_window((0, 0), window=inner_frame, anchor=tk.NW)
+        inner_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+
+        # 画像参照を保持
+        win._thumb_images = []
 
         cap = self._get_video_capture()
         unified_w, unified_h = self.unified_size
-        self._populate_category_candidates(cat, cap, unified_w, unified_h)
-        self.log(f"{cat}: {self.shown_candidates[cat]}件表示")
+
+        # 1行に4つずつ表示
+        cols = 4
+        thumb_height = 60
+
+        for i, mf in enumerate(frames):
+            row = i // cols
+            col = i % cols
+
+            # フレーム取得
+            unified_quad = center_to_quad(mf.center, unified_w, unified_h)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, float(mf.frame_idx))
+            ok, frame = cap.read()
+
+            btn_frame = ttk.Frame(inner_frame)
+            btn_frame.grid(row=row, column=col, padx=5, pady=5)
+
+            btn = ttk.Button(btn_frame, text=f"#{mf.frame_idx}")
+
+            if ok and frame is not None:
+                patch = warp_frame_to_norm(frame, unified_quad, unified_w, unified_h)
+                photo = numpy_to_photoimage(patch, target_height=thumb_height)
+                if photo:
+                    win._thumb_images.append(photo)
+                    btn.configure(image=photo, compound=tk.TOP)
+
+            # クリックでプレビュー & ウィンドウに選択状態表示
+            def on_select(mf=mf, win=win):
+                self.current_preview_mf = mf
+                self._update_preview_panel(mf)
+                for btn in self.assign_buttons.values():
+                    btn.configure(state=tk.NORMAL)
+                win.destroy()
+
+            btn.configure(command=on_select)
+            btn.pack()
+
+            # フレーム番号ラベル
+            ttk.Label(btn_frame, text=f"F{mf.frame_idx}", font=("", 8)).pack()
+
+        self.log(f"{cat}: {len(frames)}件の候補を表示")
 
     def _on_candidate_click(self, cat: str, index: int):
         """候補クリック - プレビュー表示"""
@@ -895,12 +959,12 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         )
 
         if required_complete:
-            self.goto_step3_btn.configure(state=tk.NORMAL, text="STEP3へ進む")
+            self.goto_step3_btn.configure(state=tk.NORMAL, text="STEP2へ進む")
         else:
             missing = [cat for cat in REQUIRED_CATEGORIES if self.selected_frames[cat] is None]
             self.goto_step3_btn.configure(
                 state=tk.DISABLED,
-                text=f"STEP3へ進む（{', '.join(missing)} を選択）"
+                text=f"STEP2へ進む（{', '.join(missing)} を選択）"
             )
 
     def _clear_selection(self, category: str):
