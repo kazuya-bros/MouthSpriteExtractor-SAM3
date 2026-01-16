@@ -1089,9 +1089,24 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
             "u": "mouth_u",
         }
 
+        # 正方形サイズを計算（最大辺に合わせる）
+        max_side = max(
+            max(bgra.shape[0], bgra.shape[1])
+            for bgra in self.preview_sprites.values()
+        )
+        square_size = max_side
+        self.log(f"出力サイズ: {square_size}x{square_size} (正方形)")
+
         for cat, bgra in self.preview_sprites.items():
+            # 正方形キャンバスに中央配置
+            h, w = bgra.shape[:2]
+            square_bgra = np.zeros((square_size, square_size, 4), dtype=np.uint8)
+            x_offset = (square_size - w) // 2
+            y_offset = (square_size - h) // 2
+            square_bgra[y_offset:y_offset+h, x_offset:x_offset+w] = bgra
+
             out_path = os.path.join(output_dir, f"{mouth_names[cat]}.png")
-            cv2.imwrite(out_path, bgra)
+            cv2.imwrite(out_path, square_bgra)
             self.log(f"出力: {out_path}")
 
         self.log(f"完了: {output_dir}")
