@@ -6,7 +6,7 @@ gui.py
 SAM3を使用した口スプライト抽出GUI（3ステップ版）。
 
 STEP1: 動画から口を抽出・自動分類
-STEP2: 5種類の口を選択
+STEP2: 5種類の口を選択（open/closed/halfは必須、e/uはオプション）
 STEP3: マスク調整・出力
 
 License: AGPL-3.0 (Ultralyticsライセンスに準拠)
@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import os
 import queue
-import sys
 import threading
 import traceback
 from typing import Dict, List, Optional, Tuple
@@ -51,10 +50,7 @@ from mouth_sprite_extractor import (
     MouthSpriteExtractor,
     MouthFrameInfo,
     get_unique_output_dir,
-    quad_wh,
     warp_frame_to_norm,
-    make_ellipse_mask,
-    feather_mask,
     ensure_even_ge2,
     extract_mouth_sprite,
     adjust_quad,
@@ -88,12 +84,15 @@ DEFAULT_MASK_DILATE = 0
 MAX_MASK_DILATE = 30
 
 MOUTH_CATEGORIES = ["open", "closed", "half", "e", "u"]
+REQUIRED_CATEGORIES = ["open", "closed", "half"]  # 必須カテゴリ
+OPTIONAL_CATEGORIES = ["e", "u"]  # オプションカテゴリ
+
 CATEGORY_LABELS = {
-    "open": "1: Open (大きく開いた口)",
-    "closed": "2: Closed (閉じた口)",
-    "half": "3: Half (半開き)",
-    "e": "4: E (横長「え」)",
-    "u": "5: U (すぼめ「う」)",
+    "open": "1: Open (大きく開いた口) [必須]",
+    "closed": "2: Closed (閉じた口) [必須]",
+    "half": "3: Half (半開き) [必須]",
+    "e": "4: E (横長「え」) [任意]",
+    "u": "5: U (すぼめ「う」) [任意]",
 }
 
 
@@ -111,7 +110,6 @@ def numpy_to_photoimage(
         return None
     try:
         if len(bgra.shape) == 2:
-            # グレースケール
             img = Image.fromarray(bgra)
         elif bgra.shape[2] == 4:
             img = Image.fromarray(cv2.cvtColor(bgra, cv2.COLOR_BGRA2RGBA))
@@ -164,13 +162,14 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
-        self.geometry("1000x800")
-        self.minsize(900, 700)
+        self.geometry("1000x850")
+        self.minsize(900, 750)
 
         # State
         self.video_path: str = ""
         self.extractor: Optional[MouthSpriteExtractor] = None
         self.classified_frames: Dict[str, List[MouthFrameInfo]] = {}
+        self.all_candidates: List[MouthFrameInfo] = []  # 全候補（カテゴリ横断選択用）
         self.selected_frames: Dict[str, Optional[MouthFrameInfo]] = {
             cat: None for cat in MOUTH_CATEGORIES
         }
@@ -178,7 +177,6 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         self.preview_images: Dict[str, "ImageTk.PhotoImage"] = {}
         self.unified_size: Optional[Tuple[int, int]] = None
         self.is_analyzing = False
-        self.current_step = 1
 
         # Video capture cache
         self._cached_cap: Optional[cv2.VideoCapture] = None
@@ -197,6 +195,34 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
 
         # Start log polling
         self._poll_logs()
+
+    def _reset_state(self):
+        """状態をリセット（新しい動画を解析する前に呼ぶ）"""
+        self.classified_frames = {}
+        self.all_candidates = []
+        self.selected_frames = {cat: None for cat in MOUTH_CATEGORIES}
+        self.preview_sprites = {}
+        self.preview_images = {}
+        self.unified_size = None
+        self._thumb_images = []
+
+        # VideoCaptureをリセット
+        if self._cached_cap is not None:
+            self._cached_cap.release()
+            self._cached_cap = None
+
+        # STEP2のUIをリセット
+        for cat in MOUTH_CATEGORIES:
+            self.selection_labels[cat].configure(text="未選択", foreground="gray")
+            for btn in self.candidate_buttons[cat]:
+                btn.configure(state=tk.DISABLED, text="---", image="")
+
+        # STEP3のUIをリセット
+        for cat in MOUTH_CATEGORIES:
+            self.preview_labels[cat].configure(image="", text="---")
+
+        self.step2_btn.configure(state=tk.DISABLED)
+        self.output_btn.configure(state=tk.DISABLED)
 
     def _check_sam3(self):
         """SAM3の利用可否をチェック"""
@@ -302,11 +328,26 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         frame = self.step2_frame
 
         # Instructions
+        inst_frame = ttk.Frame(frame)
+        inst_frame.pack(fill=tk.X, pady=(0, 10))
+
         ttk.Label(
-            frame,
-            text="各カテゴリから最適な口を1つ選択してください（クリックで選択）",
+            inst_frame,
+            text="各カテゴリから口を選択してください（クリックで選択）",
             font=("", 10, "bold")
-        ).pack(fill=tk.X, pady=(0, 10))
+        ).pack(anchor=tk.W)
+
+        ttk.Label(
+            inst_frame,
+            text="※ open/closed/half は必須、e/u はオプションです",
+            foreground="gray"
+        ).pack(anchor=tk.W)
+
+        ttk.Label(
+            inst_frame,
+            text="※ 適切な候補がない場合は、他のカテゴリから選ぶこともできます",
+            foreground="gray"
+        ).pack(anchor=tk.W)
 
         # Scrollable area for categories
         canvas = tk.Canvas(frame)
@@ -323,12 +364,14 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
             scrollregion=canvas.bbox("all")
         ))
 
-        # Category frames (will be populated after analysis)
+        # Category frames
         self.category_frames: Dict[str, ttk.LabelFrame] = {}
         self.candidate_buttons: Dict[str, List[ttk.Button]] = {}
         self.selection_labels: Dict[str, ttk.Label] = {}
+        self.assign_combos: Dict[str, ttk.Combobox] = {}  # カテゴリ横断選択用
 
         for cat in MOUTH_CATEGORIES:
+            is_required = cat in REQUIRED_CATEGORIES
             cat_frame = ttk.LabelFrame(
                 self.step2_inner, text=CATEGORY_LABELS[cat], padding=5
             )
@@ -345,16 +388,31 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
                 btn.pack(side=tk.LEFT, padx=2, pady=2)
                 self.candidate_buttons[cat].append(btn)
 
-            # Selection indicator
-            sel_label = ttk.Label(cat_frame, text="未選択", foreground="gray")
-            sel_label.pack(anchor=tk.W, pady=(5, 0))
+            # Selection controls
+            ctrl_frame = ttk.Frame(cat_frame)
+            ctrl_frame.pack(fill=tk.X, pady=(5, 0))
+
+            sel_label = ttk.Label(ctrl_frame, text="未選択", foreground="gray")
+            sel_label.pack(side=tk.LEFT)
             self.selection_labels[cat] = sel_label
 
+            # Clear button for optional categories
+            if not is_required:
+                clear_btn = ttk.Button(
+                    ctrl_frame, text="選択解除",
+                    command=lambda c=cat: self._clear_selection(c)
+                )
+                clear_btn.pack(side=tk.RIGHT, padx=5)
+
         # Next button
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill=tk.X, pady=10, side=tk.BOTTOM)
+
         self.step2_btn = ttk.Button(
-            frame, text="STEP3へ進む", command=self._goto_step3, state=tk.DISABLED
+            btn_frame, text="STEP3へ進む（必須項目を選択してください）",
+            command=self._goto_step3, state=tk.DISABLED
         )
-        self.step2_btn.pack(fill=tk.X, pady=10, side=tk.BOTTOM)
+        self.step2_btn.pack(fill=tk.X)
 
     def _build_step3_ui(self):
         """STEP3: 出力UIを構築"""
@@ -379,6 +437,14 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
             value="sam3", command=self._on_mask_type_changed
         ).pack(side=tk.LEFT, padx=5)
 
+        # Mask type description
+        self.mask_type_desc = ttk.Label(
+            settings_frame,
+            text="楕円マスク: シンプルな楕円形でくり抜き / SAM3マスク: AIが検出した口の形状でくり抜き",
+            foreground="gray", font=("", 8)
+        )
+        self.mask_type_desc.pack(fill=tk.X, pady=(0, 5))
+
         # Feather
         feather_frame = ttk.Frame(settings_frame)
         feather_frame.pack(fill=tk.X, pady=2)
@@ -393,23 +459,42 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         self.feather_label = ttk.Label(feather_frame, text=f"{DEFAULT_FEATHER}px", width=6)
         self.feather_label.pack(side=tk.LEFT)
 
-        # Mask dilate (for SAM3 mask)
-        dilate_frame = ttk.Frame(settings_frame)
-        dilate_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(
+            settings_frame,
+            text="フェザー: マスクの境界をぼかす幅（大きいほどなめらかに合成）",
+            foreground="gray", font=("", 8)
+        ).pack(fill=tk.X, pady=(0, 5))
 
-        ttk.Label(dilate_frame, text="マスク膨張:").pack(side=tk.LEFT)
+        # Mask dilate (for SAM3 mask)
+        self.dilate_frame = ttk.Frame(settings_frame)
+        self.dilate_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(self.dilate_frame, text="マスク膨張:").pack(side=tk.LEFT)
         self.dilate_var = tk.IntVar(value=DEFAULT_MASK_DILATE)
         self.dilate_slider = ttk.Scale(
-            dilate_frame, from_=-MAX_MASK_DILATE, to=MAX_MASK_DILATE, orient=tk.HORIZONTAL,
+            self.dilate_frame, from_=-MAX_MASK_DILATE, to=MAX_MASK_DILATE, orient=tk.HORIZONTAL,
             variable=self.dilate_var,
         )
         self.dilate_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
-        self.dilate_label = ttk.Label(dilate_frame, text="0px", width=6)
+        self.dilate_label = ttk.Label(self.dilate_frame, text="0px", width=6)
         self.dilate_label.pack(side=tk.LEFT)
+
+        self.dilate_desc = ttk.Label(
+            settings_frame,
+            text="マスク膨張: SAM3マスクを広げる/縮める（+で広げる、-で縮める）※SAM3マスク選択時のみ有効",
+            foreground="gray", font=("", 8)
+        )
+        self.dilate_desc.pack(fill=tk.X, pady=(0, 5))
 
         # Fine-tuning
         tuning_frame = ttk.LabelFrame(frame, text="位置の微調整", padding=10)
         tuning_frame.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Label(
+            tuning_frame,
+            text="検出位置がずれている場合に調整できます",
+            foreground="gray", font=("", 8)
+        ).pack(fill=tk.X, pady=(0, 5))
 
         # Offset X
         offset_x_frame = ttk.Frame(tuning_frame)
@@ -425,6 +510,12 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         self.offset_x_label = ttk.Label(offset_x_frame, text="0px", width=6)
         self.offset_x_label.pack(side=tk.LEFT)
 
+        ttk.Label(
+            tuning_frame,
+            text="オフセットX: 切り抜き位置を左右にずらす（+で右、-で左）",
+            foreground="gray", font=("", 8)
+        ).pack(fill=tk.X, pady=(0, 5))
+
         # Offset Y
         offset_y_frame = ttk.Frame(tuning_frame)
         offset_y_frame.pack(fill=tk.X, pady=2)
@@ -439,6 +530,12 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         self.offset_y_label = ttk.Label(offset_y_frame, text="0px", width=6)
         self.offset_y_label.pack(side=tk.LEFT)
 
+        ttk.Label(
+            tuning_frame,
+            text="オフセットY: 切り抜き位置を上下にずらす（+で下、-で上）",
+            foreground="gray", font=("", 8)
+        ).pack(fill=tk.X, pady=(0, 5))
+
         # Scale
         scale_frame = ttk.Frame(tuning_frame)
         scale_frame.pack(fill=tk.X, pady=2)
@@ -452,6 +549,12 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         self.scale_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
         self.scale_label = ttk.Label(scale_frame, text="100%", width=6)
         self.scale_label.pack(side=tk.LEFT)
+
+        ttk.Label(
+            tuning_frame,
+            text="スケール: 切り抜き範囲を拡大/縮小（100%が元サイズ）",
+            foreground="gray", font=("", 8)
+        ).pack(fill=tk.X, pady=(0, 5))
 
         # Preview button
         preview_btn_frame = ttk.Frame(frame)
@@ -494,6 +597,9 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
             frame, text="PNG出力", command=self._on_output, state=tk.DISABLED
         )
         self.output_btn.pack(fill=tk.X, pady=10)
+
+        # 初期状態で膨張スライダーを無効化（楕円マスクがデフォルト）
+        self.dilate_slider.configure(state=tk.DISABLED)
 
     def _poll_logs(self):
         """ログキューをポーリング"""
@@ -559,6 +665,9 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         if not self.video_path or self.is_analyzing:
             return
 
+        # 状態をリセット
+        self._reset_state()
+
         self.is_analyzing = True
         self.step1_btn.configure(state=tk.DISABLED)
         self.progress_var.set(0)
@@ -580,7 +689,6 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
 
             def progress_callback(msg: str):
                 self.log(msg)
-                # プログレスバーを更新
                 if "処理中" in msg:
                     try:
                         parts = msg.split("/")
@@ -605,16 +713,21 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
                 candidates_per_category=CANDIDATES_PER_CATEGORY,
             )
 
+            # 全候補リストを作成（カテゴリ横断選択用）
+            self.all_candidates = []
+            seen_frames = set()
+            for frames in self.classified_frames.values():
+                for mf in frames:
+                    if mf.frame_idx not in seen_frames:
+                        self.all_candidates.append(mf)
+                        seen_frames.add(mf.frame_idx)
+
             self.log(f"分類完了: 各カテゴリ{CANDIDATES_PER_CATEGORY}件ずつ")
 
             # 統一サイズを計算
-            all_frames = []
-            for frames in self.classified_frames.values():
-                all_frames.extend(frames)
-
-            if all_frames:
-                max_w = max(mf.width for mf in all_frames)
-                max_h = max(mf.height for mf in all_frames)
+            if self.all_candidates:
+                max_w = max(mf.width for mf in self.all_candidates)
+                max_h = max(mf.height for mf in self.all_candidates)
                 self.unified_size = (
                     ensure_even_ge2(int(max_w * 1.2)),
                     ensure_even_ge2(int(max_h * 1.2))
@@ -623,7 +736,7 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
 
             # UIを更新
             self.after(0, self._populate_step2)
-            self.after(0, lambda: self.notebook.select(1))  # STEP2へ
+            self.after(0, lambda: self.notebook.select(1))
 
             self.progress_var.set(100)
             self.log("解析完了 - STEP2で口を選択してください")
@@ -643,7 +756,7 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         cap = self._get_video_capture()
         unified_w, unified_h = self.unified_size
 
-        self._thumb_images = []  # Reset image references
+        self._thumb_images = []
 
         for cat in MOUTH_CATEGORIES:
             frames = self.classified_frames.get(cat, [])
@@ -653,17 +766,18 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
                 if i < len(frames):
                     mf = frames[i]
 
-                    # サムネイル生成
+                    # サムネイル生成（統一サイズで正規化してから表示）
                     cap.set(cv2.CAP_PROP_POS_FRAMES, float(mf.frame_idx))
                     ok, frame = cap.read()
                     if ok and frame is not None:
+                        # 統一サイズに正規化
                         patch = warp_frame_to_norm(frame, mf.quad, unified_w, unified_h)
-                        photo = numpy_to_photoimage(patch, THUMB_SIZE)
+                        photo = numpy_to_photoimage(patch, THUMB_SIZE, keep_aspect=False)
                         if photo:
                             self._thumb_images.append(photo)
                             btn.configure(image=photo, text="", compound=tk.TOP)
 
-                    # クリックイベント
+                    # クリックイベント（どのカテゴリに割り当てるか選択可能）
                     btn.configure(
                         command=lambda c=cat, idx=i: self._on_candidate_click(c, idx)
                     )
@@ -671,29 +785,91 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
                 else:
                     btn.configure(state=tk.DISABLED, text="---", image="")
 
-    def _on_candidate_click(self, category: str, index: int):
-        """候補がクリックされた"""
-        frames = self.classified_frames.get(category, [])
-        if index < len(frames):
-            self.selected_frames[category] = frames[index]
-            self.selection_labels[category].configure(
-                text=f"選択中: フレーム {frames[index].frame_idx}",
-                foreground="green"
-            )
-            self.log(f"{category}: フレーム {frames[index].frame_idx} を選択")
+    def _on_candidate_click(self, source_category: str, index: int):
+        """候補がクリックされた - 割り当て先カテゴリを選択するダイアログを表示"""
+        frames = self.classified_frames.get(source_category, [])
+        if index >= len(frames):
+            return
 
-            # 全カテゴリ選択済みかチェック
-            if all(self.selected_frames.values()):
-                self.step2_btn.configure(state=tk.NORMAL)
+        selected_mf = frames[index]
+
+        # 簡易的なカテゴリ選択ダイアログ
+        dialog = tk.Toplevel(self)
+        dialog.title("割り当て先を選択")
+        dialog.geometry("300x250")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ttk.Label(
+            dialog,
+            text=f"フレーム {selected_mf.frame_idx} を\nどのカテゴリに割り当てますか？",
+            justify=tk.CENTER
+        ).pack(pady=10)
+
+        for cat in MOUTH_CATEGORIES:
+            is_required = cat in REQUIRED_CATEGORIES
+            label = f"{cat.upper()}" + (" [必須]" if is_required else " [任意]")
+
+            btn = ttk.Button(
+                dialog, text=label,
+                command=lambda c=cat: self._assign_to_category(selected_mf, c, dialog)
+            )
+            btn.pack(fill=tk.X, padx=20, pady=2)
+
+        ttk.Button(dialog, text="キャンセル", command=dialog.destroy).pack(pady=10)
+
+    def _assign_to_category(self, mf: MouthFrameInfo, category: str, dialog: tk.Toplevel):
+        """フレームをカテゴリに割り当て"""
+        self.selected_frames[category] = mf
+        self.selection_labels[category].configure(
+            text=f"選択中: フレーム {mf.frame_idx}",
+            foreground="green"
+        )
+        self.log(f"{category}: フレーム {mf.frame_idx} を選択")
+
+        dialog.destroy()
+        self._check_step2_complete()
+
+    def _clear_selection(self, category: str):
+        """カテゴリの選択を解除"""
+        self.selected_frames[category] = None
+        self.selection_labels[category].configure(text="未選択", foreground="gray")
+        self.log(f"{category}: 選択を解除")
+        self._check_step2_complete()
+
+    def _check_step2_complete(self):
+        """STEP2の必須項目が選択されているかチェック"""
+        required_complete = all(
+            self.selected_frames[cat] is not None
+            for cat in REQUIRED_CATEGORIES
+        )
+
+        if required_complete:
+            self.step2_btn.configure(
+                state=tk.NORMAL,
+                text="STEP3へ進む"
+            )
+        else:
+            missing = [cat for cat in REQUIRED_CATEGORIES if self.selected_frames[cat] is None]
+            self.step2_btn.configure(
+                state=tk.DISABLED,
+                text=f"STEP3へ進む（{', '.join(missing)} を選択してください）"
+            )
 
     def _goto_step3(self):
         """STEP3へ進む"""
-        if not all(self.selected_frames.values()):
-            messagebox.showwarning("警告", "すべてのカテゴリで口を選択してください")
+        required_complete = all(
+            self.selected_frames[cat] is not None
+            for cat in REQUIRED_CATEGORIES
+        )
+
+        if not required_complete:
+            missing = [cat for cat in REQUIRED_CATEGORIES if self.selected_frames[cat] is None]
+            messagebox.showwarning("警告", f"必須項目を選択してください: {', '.join(missing)}")
             return
 
-        self.notebook.select(2)  # STEP3へ
-        self._on_update_preview()  # プレビューを自動更新
+        self.notebook.select(2)
+        self._on_update_preview()
 
     def _on_mask_type_changed(self):
         """マスク種類が変更された"""
@@ -711,6 +887,7 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         self.offset_y_var.set(DEFAULT_OFFSET_Y)
         self.scale_var.set(DEFAULT_SCALE)
         self.mask_type_var.set("ellipse")
+        self._on_mask_type_changed()  # 膨張スライダーの状態を更新
         self.log("設定をリセットしました")
 
     def _get_video_capture(self) -> cv2.VideoCapture:
@@ -721,7 +898,16 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
 
     def _on_update_preview(self):
         """プレビュー更新"""
-        if not all(self.selected_frames.values()) or not self.unified_size:
+        if not self.unified_size:
+            return
+
+        # 必須カテゴリがすべて選択されているかチェック
+        required_complete = all(
+            self.selected_frames[cat] is not None
+            for cat in REQUIRED_CATEGORIES
+        )
+
+        if not required_complete:
             return
 
         cap = self._get_video_capture()
@@ -736,8 +922,11 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
 
         self.preview_sprites = {}
 
-        for cat, mf in self.selected_frames.items():
+        for cat in MOUTH_CATEGORIES:
+            mf = self.selected_frames.get(cat)
             if mf is None:
+                # 未選択のカテゴリは「---」表示
+                self.preview_labels[cat].configure(image="", text="---")
                 continue
 
             cap.set(cv2.CAP_PROP_POS_FRAMES, float(mf.frame_idx))
