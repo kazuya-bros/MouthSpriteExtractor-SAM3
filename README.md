@@ -2,15 +2,33 @@
 
 SAM3 (Segment Anything Model 3) を使用して、動画から口スプライト（5種類のPNG）を自動抽出するツールです。
 
-PNGTuber / VTuber 向けの口パク素材作成に使用できます。
+[MotionPNGTuber](https://github.com/uezo/MotionPNGTuber) 向けの口パク素材作成に使用できます。
+
+## このプロジェクトについて
+
+本プロジェクトは、[MotionPNGTuber](https://github.com/uezo/MotionPNGTuber)（作者: ろてじん[@uezo](https://github.com/uezo)さん）の口スプライト抽出機能を、SAM3を使用して再実装したものです。
+
+オリジナルのMotionPNGTuberは `anime-face-detector` を使用していますが、Python 3.10が必要であり、新しいPython環境での利用が困難でした。本プロジェクトでは Ultralytics 経由で SAM3 を使用することで、Python 3.12以降での動作を可能にしています。
+
+**なぜ別リポジトリなのか:**
+
+本来であればMotionPNGTuberにプルリクエストを送るべきところですが、以下の理由からやむを得ず別リポジトリとして公開しています：
+
+- **ライセンスの問題**: Ultralyticsパッケージを使用するとAGPL-3.0ライセンスが適用され、MotionPNGTuber本体（MITライセンス）のライセンス体系に影響を与える可能性がある
+- **依存関係の複雑さ**: SAM3モデルの取得にはHuggingFaceでのアクセス承認が必要であり、セットアップが複雑になる
+
+MotionPNGTuberの素晴らしい設計と実装に感謝いたします。
 
 ## 特徴
 
 - **SAM3のテキストプロンプト**で口を自動検出（"mouth"プロンプト使用）
 - anime-face-detector等の顔検出ライブラリ不要
-- 5種類の口形状を自動選別（open, closed, half, e, u）
-- 楕円マスク＋フェザーで自然な透過PNG出力
-- GUIとCLIの両方に対応
+- **Python 3.12以降対応**
+- 5種類の口形状を自動分類（open, closed, half, e, u）
+- ユーザーが候補から選択可能（自動分類の候補を手動で修正できる）
+- 楕円マスク または SAM3マスク＋フェザーで自然な透過PNG出力
+- **MotionPNGTuber互換**の正方形スプライト出力
+- GUIで直感的に操作可能
 
 ## 必要環境
 
@@ -24,7 +42,7 @@ PNGTuber / VTuber 向けの口パク素材作成に使用できます。
 
 ```bash
 # 1. リポジトリをクローン
-git clone https://github.com/yourusername/MouthSpriteExtractor-SAM3.git
+git clone https://github.com/kazuya-bros/MouthSpriteExtractor-SAM3.git
 cd MouthSpriteExtractor-SAM3
 
 # 2. 依存パッケージを一括インストール（CUDA 12.6版PyTorch含む）
@@ -87,16 +105,23 @@ huggingface-cli download facebook/sam3 sam3.pt --local-dir .
 python gui.py
 ```
 
+**STEP1: 抽出・選択**
 1. 動画ファイルを選択（またはドラッグ&ドロップ）
 2. 「解析開始」をクリック
-3. 候補フレームに1-5の数字を入力して割り当て
-   - 1: open（大きく開いた口）
-   - 2: closed（閉じた口）
-   - 3: half（半開きの口）
-   - 4: e（横長の口、「え」）
-   - 5: u（すぼめた口、「う」）
-4. 「プレビュー更新」で確認
-5. 「PNG出力」で保存
+3. 左側の候補一覧から口の形を選択
+4. 右側のプレビューで確認し、カテゴリボタンで割り当て
+   - **OPEN**: 大きく開いた口（必須）
+   - **CLOSED**: 閉じた口（必須）
+   - **HALF**: 半開きの口（必須）
+   - **E**: 横長の口（任意）
+   - **U**: すぼめた口（任意）
+5. 必須3種類を選択したら「STEP2へ進む」
+
+**STEP2: 出力**
+1. マスク設定（楕円 or SAM3）、フェザー幅を調整
+2. 位置調整（X/Y オフセット、倍率）で微調整
+3. 「プレビュー更新」で確認
+4. 「PNG出力」で保存
 
 ### CLI
 
@@ -115,12 +140,21 @@ python mouth_sprite_extractor.py --video your_video.mp4 --out output_dir/
 
 ```
 output_dir/
-├── mouth_open.png     # 大きく開いた口
-├── mouth_closed.png   # 閉じた口
-├── mouth_half.png     # 半開きの口
-├── mouth_e.png        # 横長の口
-└── mouth_u.png        # すぼめた口
+├── open.png     # 大きく開いた口
+├── closed.png   # 閉じた口
+├── half.png     # 半開きの口
+├── e.png        # 横長の口（任意）
+└── u.png        # すぼめた口（任意）
 ```
+
+出力されるPNGは正方形で、MotionPNGTuberでそのまま使用できます。
+
+## MotionPNGTuberとの連携
+
+1. 本ツールで口スプライト5枚を出力
+2. MotionPNGTuberで動画の口トラッキングを実行（`face_track_anime_detector.py`など）
+3. `calibrate_mouth_track.py`でスプライトとトラックの位置合わせ
+4. MotionPNGTuberで口パク動画を生成
 
 ## ライセンス
 
@@ -149,10 +183,10 @@ SAM3モデルの使用には[Meta SAM License](https://github.com/facebookresear
 
 ## 謝辞
 
+- **[ろてじん (@uezo)](https://github.com/uezo)** さん - [MotionPNGTuber](https://github.com/uezo/MotionPNGTuber) の作者。素晴らしいPNGTuberツールの設計と実装に感謝いたします
 - [Ultralytics](https://github.com/ultralytics/ultralytics) - SAM3のPython実装
 - [facebookresearch/sam3](https://github.com/facebookresearch/sam3) - SAM3モデル
-- [MotionPNGTuber](https://github.com/uezo/MotionPNGTuber) - オリジナルプロジェクト
 
 ## 関連プロジェクト
 
-- [MotionPNGTuber](https://github.com/uezo/MotionPNGTuber) - anime-face-detectorを使用した口スプライト抽出ツール（Python 3.10）
+- [MotionPNGTuber](https://github.com/uezo/MotionPNGTuber) - anime-face-detectorを使用した口スプライト抽出ツール（Python 3.10）。本プロジェクトのベースとなったツールです

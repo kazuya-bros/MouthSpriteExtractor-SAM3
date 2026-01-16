@@ -1082,11 +1082,11 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         os.makedirs(output_dir, exist_ok=True)
 
         mouth_names = {
-            "open": "mouth_open",
-            "closed": "mouth_closed",
-            "half": "mouth_half",
-            "e": "mouth_e",
-            "u": "mouth_u",
+            "open": "open",
+            "closed": "closed",
+            "half": "half",
+            "e": "e",
+            "u": "u",
         }
 
         # 正方形サイズを計算（最大辺に合わせる）
