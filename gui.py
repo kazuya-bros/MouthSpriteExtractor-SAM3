@@ -3,10 +3,9 @@
 """
 gui.py
 
-SAM3を使用した口スプライト抽出GUI（3ステップ版）。
+SAM3を使用した口スプライト抽出GUI（2ステップ版・左右分割レイアウト）。
 
-STEP1: 動画から口を抽出・自動分類
-STEP2: 5種類の口を選択（open/closed/halfは必須、e/uはオプション）
+STEP1-2: 動画選択・抽出・口選択（左右分割）
 STEP3: マスク調整・出力
 
 License: AGPL-3.0 (Ultralyticsライセンスに準拠)
@@ -64,9 +63,10 @@ from mouth_sprite_extractor import (
 # ---------------------------------------------------------------------------
 
 APP_TITLE = "Mouth Sprite Extractor (SAM3)"
-CANDIDATES_PER_CATEGORY = 5
-THUMB_SIZE = 64
-PREVIEW_SIZE = 100
+INITIAL_CANDIDATES_PER_CATEGORY = 5
+MAX_CANDIDATES_PER_CATEGORY = 20
+THUMB_HEIGHT = 40  # サムネイルの高さ（アスペクト比維持）
+PREVIEW_MAX_SIZE = 400  # 右側プレビューの最大サイズ
 
 DEFAULT_FEATHER = 15
 MAX_FEATHER = 50
@@ -85,15 +85,15 @@ DEFAULT_MASK_DILATE = 0
 MAX_MASK_DILATE = 30
 
 MOUTH_CATEGORIES = ["open", "closed", "half", "e", "u"]
-REQUIRED_CATEGORIES = ["open", "closed", "half"]  # 必須カテゴリ
-OPTIONAL_CATEGORIES = ["e", "u"]  # オプションカテゴリ
+REQUIRED_CATEGORIES = ["open", "closed", "half"]
+OPTIONAL_CATEGORIES = ["e", "u"]
 
-CATEGORY_LABELS = {
-    "open": "1: Open (大きく開いた口) [必須]",
-    "closed": "2: Closed (閉じた口) [必須]",
-    "half": "3: Half (半開き) [必須]",
-    "e": "4: E (横長「え」) [任意]",
-    "u": "5: U (すぼめ「う」) [任意]",
+CATEGORY_LABELS_SHORT = {
+    "open": "Open [必須]",
+    "closed": "Closed [必須]",
+    "half": "Half [必須]",
+    "e": "E [任意]",
+    "u": "U [任意]",
 }
 
 
@@ -102,34 +102,36 @@ CATEGORY_LABELS = {
 # ---------------------------------------------------------------------------
 
 def numpy_to_photoimage(
-    bgra: np.ndarray,
-    max_size: int,
-    keep_aspect: bool = True,
+    img: np.ndarray,
+    max_size: Optional[int] = None,
+    target_height: Optional[int] = None,
 ) -> Optional["ImageTk.PhotoImage"]:
     """numpy配列をPhotoImageに変換"""
     if not _HAS_PIL:
         return None
     try:
-        if len(bgra.shape) == 2:
-            img = Image.fromarray(bgra)
-        elif bgra.shape[2] == 4:
-            img = Image.fromarray(cv2.cvtColor(bgra, cv2.COLOR_BGRA2RGBA))
+        if len(img.shape) == 2:
+            pil_img = Image.fromarray(img)
+        elif img.shape[2] == 4:
+            pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA))
         else:
-            img = Image.fromarray(cv2.cvtColor(bgra, cv2.COLOR_BGR2RGB))
+            pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
 
-        if keep_aspect:
-            w, h = img.size
-            if w >= h:
-                new_w = max_size
-                new_h = max(1, int(h * max_size / w))
-            else:
-                new_h = max_size
-                new_w = max(1, int(w * max_size / h))
-            img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-        else:
-            img = img.resize((max_size, max_size), Image.Resampling.LANCZOS)
+        w, h = pil_img.size
 
-        return ImageTk.PhotoImage(img)
+        if target_height is not None:
+            # 高さ固定でアスペクト比維持
+            new_h = target_height
+            new_w = max(1, int(w * target_height / h))
+            pil_img = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        elif max_size is not None:
+            # 最大サイズでアスペクト比維持
+            scale = min(max_size / w, max_size / h, 1.0)
+            if scale < 1.0:
+                new_w, new_h = int(w * scale), int(h * scale)
+                pil_img = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+        return ImageTk.PhotoImage(pil_img)
     except Exception:
         return None
 
@@ -158,19 +160,19 @@ def composite_on_checkerboard(bgra: np.ndarray, checker_size: int = 8) -> np.nda
 # ---------------------------------------------------------------------------
 
 class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
-    """口スプライト抽出GUIアプリケーション（3ステップ版）"""
+    """口スプライト抽出GUIアプリケーション（左右分割版）"""
 
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
-        self.geometry("1000x950")
-        self.minsize(900, 700)
+        self.geometry("1100x750")
+        self.minsize(1000, 650)
 
         # State
         self.video_path: str = ""
         self.extractor: Optional[MouthSpriteExtractor] = None
         self.classified_frames: Dict[str, List[MouthFrameInfo]] = {}
-        self.all_candidates: List[MouthFrameInfo] = []  # 全候補（カテゴリ横断選択用）
+        self.all_candidates: List[MouthFrameInfo] = []
         self.selected_frames: Dict[str, Optional[MouthFrameInfo]] = {
             cat: None for cat in MOUTH_CATEGORIES
         }
@@ -178,6 +180,14 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         self.preview_images: Dict[str, "ImageTk.PhotoImage"] = {}
         self.unified_size: Optional[Tuple[int, int]] = None
         self.is_analyzing = False
+
+        # 現在表示中の候補数
+        self.shown_candidates: Dict[str, int] = {
+            cat: INITIAL_CANDIDATES_PER_CATEGORY for cat in MOUTH_CATEGORIES
+        }
+
+        # 現在プレビュー中のフレーム
+        self.current_preview_mf: Optional[MouthFrameInfo] = None
 
         # Video capture cache
         self._cached_cap: Optional[cv2.VideoCapture] = None
@@ -187,6 +197,7 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
 
         # Image references (prevent GC)
         self._thumb_images: List["ImageTk.PhotoImage"] = []
+        self._preview_photo: Optional["ImageTk.PhotoImage"] = None
 
         # Build UI
         self._build_ui()
@@ -198,7 +209,7 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         self._poll_logs()
 
     def _reset_state(self):
-        """状態をリセット（新しい動画を解析する前に呼ぶ）"""
+        """状態をリセット"""
         self.classified_frames = {}
         self.all_candidates = []
         self.selected_frames = {cat: None for cat in MOUTH_CATEGORIES}
@@ -206,367 +217,345 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         self.preview_images = {}
         self.unified_size = None
         self._thumb_images = []
+        self.current_preview_mf = None
+        self.shown_candidates = {
+            cat: INITIAL_CANDIDATES_PER_CATEGORY for cat in MOUTH_CATEGORIES
+        }
 
-        # VideoCaptureをリセット
         if self._cached_cap is not None:
             self._cached_cap.release()
             self._cached_cap = None
 
-        # STEP2のUIをリセット
-        for cat in MOUTH_CATEGORIES:
-            self.selection_labels[cat].configure(text="未選択", foreground="gray")
-            for btn in self.candidate_buttons[cat]:
-                btn.configure(state=tk.DISABLED, text="---", image="")
-
-        # STEP3のUIをリセット
-        for cat in MOUTH_CATEGORIES:
-            self.preview_labels[cat].configure(image="", text="---")
-
-        self.step2_btn.configure(state=tk.DISABLED)
-        self.output_btn.configure(state=tk.DISABLED)
+        # UIリセット
+        self._clear_candidates_ui()
+        self._clear_preview_panel()
+        self._update_selection_status()
+        self.goto_step3_btn.configure(state=tk.DISABLED)
 
     def _check_sam3(self):
         """SAM3の利用可否をチェック"""
         available, error = is_sam3_available()
         if not available:
             self.log(f"警告: SAM3が利用できません: {error}")
-            self.step1_btn.configure(state=tk.DISABLED)
+            self.analyze_btn.configure(state=tk.DISABLED)
         else:
             self.log("SAM3: 利用可能")
 
     def _build_ui(self):
         """UIを構築"""
-        # Main notebook for steps
+        # Main notebook
         self.notebook = ttk.Notebook(self)
-        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # Create step frames
-        self.step1_frame = ttk.Frame(self.notebook)
-        self.step2_frame = ttk.Frame(self.notebook)
+        # STEP1-2: 抽出・選択（左右分割）
+        self.step12_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.step12_frame, text="STEP1-2: 抽出・選択")
+
+        # STEP3: 出力設定
         self.step3_frame = ttk.Frame(self.notebook)
-
-        self.notebook.add(self.step1_frame, text="STEP1: 抽出")
-        self.notebook.add(self.step2_frame, text="STEP2: 選択")
         self.notebook.add(self.step3_frame, text="STEP3: 出力")
 
-        self._build_step1_ui()
-        self._build_step2_ui()
+        self._build_step12_ui()
         self._build_step3_ui()
 
-        # Log area (common)
-        log_frame = ttk.LabelFrame(self, text="ログ", padding=5)
-        log_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+        # Log area
+        log_frame = ttk.LabelFrame(self, text="ログ", padding=3)
+        log_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
 
-        self.log_text = tk.Text(log_frame, height=4, state=tk.DISABLED, wrap=tk.WORD)
+        self.log_text = tk.Text(log_frame, height=3, state=tk.DISABLED, wrap=tk.WORD)
         self.log_text.pack(fill=tk.X)
 
-    def _build_step1_ui(self):
-        """STEP1: 抽出UIを構築"""
-        frame = self.step1_frame
+    def _build_step12_ui(self):
+        """STEP1-2: 左右分割UIを構築"""
+        frame = self.step12_frame
 
-        # Video selection
-        video_frame = ttk.LabelFrame(frame, text="動画ファイル", padding=10)
-        video_frame.pack(fill=tk.X, pady=(0, 10))
+        # 上部: 動画選択 & 解析
+        top_frame = ttk.Frame(frame)
+        top_frame.pack(fill=tk.X, pady=(0, 5))
 
-        self.video_label = ttk.Label(video_frame, text="ファイルを選択してください（またはドラッグ&ドロップ）")
-        self.video_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        # 動画選択
+        ttk.Label(top_frame, text="動画:").pack(side=tk.LEFT)
+        self.video_label = ttk.Label(top_frame, text="ファイルを選択...", width=40)
+        self.video_label.pack(side=tk.LEFT, padx=5)
 
-        self.select_btn = ttk.Button(
-            video_frame, text="選択...", command=self._on_select_video
+        self.select_btn = ttk.Button(top_frame, text="選択", command=self._on_select_video)
+        self.select_btn.pack(side=tk.LEFT)
+
+        # パディング
+        ttk.Label(top_frame, text="  パディング:").pack(side=tk.LEFT)
+        self.padding_var = tk.DoubleVar(value=DEFAULT_PADDING)
+        self.padding_slider = ttk.Scale(
+            top_frame, from_=0.0, to=1.0, orient=tk.HORIZONTAL,
+            variable=self.padding_var, length=100
         )
-        self.select_btn.pack(side=tk.RIGHT, padx=(10, 0))
+        self.padding_slider.pack(side=tk.LEFT, padx=2)
+        self.padding_label = ttk.Label(top_frame, text="30%", width=4)
+        self.padding_label.pack(side=tk.LEFT)
 
-        # Drag & drop support
+        # 解析ボタン
+        self.analyze_btn = ttk.Button(
+            top_frame, text="解析開始", command=self._on_analyze, state=tk.DISABLED
+        )
+        self.analyze_btn.pack(side=tk.LEFT, padx=10)
+
+        # プログレスバー
+        self.progress_var = tk.DoubleVar(value=0)
+        self.progress_bar = ttk.Progressbar(
+            top_frame, variable=self.progress_var, maximum=100, length=150
+        )
+        self.progress_bar.pack(side=tk.LEFT, padx=5)
+
+        # Drag & drop
         if _HAS_TK_DND:
             self.drop_target_register(DND_FILES)
             self.dnd_bind("<<Drop>>", self._on_drop)
 
-        # Settings
-        settings_frame = ttk.LabelFrame(frame, text="検出設定", padding=10)
-        settings_frame.pack(fill=tk.X, pady=(0, 10))
+        # 左右分割メインエリア
+        main_paned = ttk.PanedWindow(frame, orient=tk.HORIZONTAL)
+        main_paned.pack(fill=tk.BOTH, expand=True)
 
-        # Padding
-        padding_frame = ttk.Frame(settings_frame)
-        padding_frame.pack(fill=tk.X, pady=2)
+        # 左側: 候補一覧
+        left_frame = ttk.LabelFrame(main_paned, text="候補一覧", padding=5)
+        main_paned.add(left_frame, weight=1)
 
-        ttk.Label(padding_frame, text="パディング:").pack(side=tk.LEFT)
-        self.padding_var = tk.DoubleVar(value=DEFAULT_PADDING)
-        self.padding_slider = ttk.Scale(
-            padding_frame, from_=0.0, to=1.0, orient=tk.HORIZONTAL,
-            variable=self.padding_var,
+        # 候補一覧用スクロール
+        self.candidates_canvas = tk.Canvas(left_frame, width=450)
+        candidates_scrollbar = ttk.Scrollbar(
+            left_frame, orient=tk.VERTICAL, command=self.candidates_canvas.yview
         )
-        self.padding_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
-        self.padding_label = ttk.Label(padding_frame, text="30%", width=5)
-        self.padding_label.pack(side=tk.LEFT)
+        self.candidates_inner = ttk.Frame(self.candidates_canvas)
 
-        ttk.Label(
-            settings_frame,
-            text="パディング: 口の周囲に追加する余白（大きいほど広く切り抜き）",
-            foreground="gray", font=("", 8)
-        ).pack(fill=tk.X, pady=(0, 5))
-
-        # Analyze button
-        self.step1_btn = ttk.Button(
-            frame, text="解析開始（SAM3で口を検出）", command=self._on_analyze, state=tk.DISABLED
+        self.candidates_canvas.configure(yscrollcommand=candidates_scrollbar.set)
+        candidates_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.candidates_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.candidates_canvas.create_window(
+            (0, 0), window=self.candidates_inner, anchor=tk.NW
         )
-        self.step1_btn.pack(fill=tk.X, pady=10)
-
-        # Progress
-        self.progress_var = tk.DoubleVar(value=0)
-        self.progress_bar = ttk.Progressbar(
-            frame, variable=self.progress_var, maximum=100
-        )
-        self.progress_bar.pack(fill=tk.X)
-
-        # Info
-        info_text = """
-【STEP1: 抽出】
-1. 動画ファイルを選択
-2. 「解析開始」をクリック
-3. SAM3が自動的に口を検出し、5種類に分類します
-
-検出完了後、自動的にSTEP2に進みます。
-        """
-        info_label = ttk.Label(frame, text=info_text, justify=tk.LEFT)
-        info_label.pack(fill=tk.X, pady=10)
-
-    def _build_step2_ui(self):
-        """STEP2: 選択UIを構築"""
-        frame = self.step2_frame
-
-        # Instructions
-        inst_frame = ttk.Frame(frame)
-        inst_frame.pack(fill=tk.X, pady=(0, 10))
-
-        ttk.Label(
-            inst_frame,
-            text="各カテゴリから口を選択してください（クリックで選択）",
-            font=("", 10, "bold")
-        ).pack(anchor=tk.W)
-
-        ttk.Label(
-            inst_frame,
-            text="※ open/closed/half は必須、e/u はオプションです",
-            foreground="gray"
-        ).pack(anchor=tk.W)
-
-        ttk.Label(
-            inst_frame,
-            text="※ 適切な候補がない場合は、他のカテゴリから選ぶこともできます",
-            foreground="gray"
-        ).pack(anchor=tk.W)
-
-        # Scrollable area for categories
-        canvas = tk.Canvas(frame)
-        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=canvas.yview)
-        self.step2_inner = ttk.Frame(canvas)
-
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        canvas.create_window((0, 0), window=self.step2_inner, anchor=tk.NW)
-
-        self.step2_inner.bind("<Configure>", lambda e: canvas.configure(
-            scrollregion=canvas.bbox("all")
+        self.candidates_inner.bind("<Configure>", lambda e: self.candidates_canvas.configure(
+            scrollregion=self.candidates_canvas.bbox("all")
         ))
 
-        # Category frames
-        self.category_frames: Dict[str, ttk.LabelFrame] = {}
+        # カテゴリごとのUI
+        self.category_frames: Dict[str, ttk.Frame] = {}
         self.candidate_buttons: Dict[str, List[ttk.Button]] = {}
-        self.selection_labels: Dict[str, ttk.Label] = {}
-        self.assign_combos: Dict[str, ttk.Combobox] = {}  # カテゴリ横断選択用
+        self.more_buttons: Dict[str, ttk.Button] = {}
 
         for cat in MOUTH_CATEGORIES:
-            is_required = cat in REQUIRED_CATEGORIES
-            cat_frame = ttk.LabelFrame(
-                self.step2_inner, text=CATEGORY_LABELS[cat], padding=5
+            self._build_category_row(cat)
+
+        # 右側: プレビュー & 選択状況
+        right_frame = ttk.Frame(main_paned)
+        main_paned.add(right_frame, weight=1)
+
+        # プレビューパネル
+        preview_panel = ttk.LabelFrame(right_frame, text="プレビュー", padding=5)
+        preview_panel.pack(fill=tk.BOTH, expand=True)
+
+        self.preview_label = ttk.Label(preview_panel, text="候補をクリックしてプレビュー")
+        self.preview_label.pack(pady=10)
+
+        self.preview_info_label = ttk.Label(preview_panel, text="", foreground="gray")
+        self.preview_info_label.pack()
+
+        # カテゴリ選択ボタン
+        self.cat_btn_frame = ttk.Frame(preview_panel)
+        self.cat_btn_frame.pack(pady=10)
+
+        ttk.Label(self.cat_btn_frame, text="割り当て先:").pack(side=tk.LEFT, padx=(0, 5))
+
+        self.assign_buttons: Dict[str, ttk.Button] = {}
+        for cat in MOUTH_CATEGORIES:
+            btn = ttk.Button(
+                self.cat_btn_frame, text=cat.upper(), width=8,
+                command=lambda c=cat: self._assign_current_to_category(c),
+                state=tk.DISABLED
             )
-            cat_frame.pack(fill=tk.X, pady=5, padx=5)
-            self.category_frames[cat] = cat_frame
+            btn.pack(side=tk.LEFT, padx=2)
+            self.assign_buttons[cat] = btn
 
-            # Candidates row
-            cand_frame = ttk.Frame(cat_frame)
-            cand_frame.pack(fill=tk.X)
+        # 選択状況
+        status_frame = ttk.LabelFrame(right_frame, text="選択状況", padding=5)
+        status_frame.pack(fill=tk.X, pady=(5, 0))
 
-            self.candidate_buttons[cat] = []
-            for i in range(CANDIDATES_PER_CATEGORY):
-                btn = ttk.Button(cand_frame, text=f"[{i+1}]", width=10)
-                btn.pack(side=tk.LEFT, padx=2, pady=2)
-                self.candidate_buttons[cat].append(btn)
+        self.status_labels: Dict[str, ttk.Label] = {}
+        for cat in MOUTH_CATEGORIES:
+            row = ttk.Frame(status_frame)
+            row.pack(fill=tk.X, pady=1)
 
-            # Selection controls
-            ctrl_frame = ttk.Frame(cat_frame)
-            ctrl_frame.pack(fill=tk.X, pady=(5, 0))
+            is_required = cat in REQUIRED_CATEGORIES
+            label_text = f"{cat.upper()}" + (" [必須]" if is_required else " [任意]")
+            ttk.Label(row, text=label_text, width=15).pack(side=tk.LEFT)
 
-            sel_label = ttk.Label(ctrl_frame, text="未選択", foreground="gray")
-            sel_label.pack(side=tk.LEFT)
-            self.selection_labels[cat] = sel_label
+            status_lbl = ttk.Label(row, text="未選択", foreground="gray")
+            status_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            self.status_labels[cat] = status_lbl
 
-            # Clear button for optional categories
             if not is_required:
                 clear_btn = ttk.Button(
-                    ctrl_frame, text="選択解除",
+                    row, text="解除", width=4,
                     command=lambda c=cat: self._clear_selection(c)
                 )
-                clear_btn.pack(side=tk.RIGHT, padx=5)
+                clear_btn.pack(side=tk.RIGHT)
 
-        # Next button
-        btn_frame = ttk.Frame(frame)
-        btn_frame.pack(fill=tk.X, pady=10, side=tk.BOTTOM)
-
-        self.step2_btn = ttk.Button(
-            btn_frame, text="STEP3へ進む（必須項目を選択してください）",
+        # STEP3へボタン
+        self.goto_step3_btn = ttk.Button(
+            right_frame, text="STEP3へ進む（必須項目を選択してください）",
             command=self._goto_step3, state=tk.DISABLED
         )
-        self.step2_btn.pack(fill=tk.X)
+        self.goto_step3_btn.pack(fill=tk.X, pady=(10, 0))
+
+    def _build_category_row(self, cat: str):
+        """カテゴリ行を構築"""
+        cat_frame = ttk.Frame(self.candidates_inner)
+        cat_frame.pack(fill=tk.X, pady=3)
+        self.category_frames[cat] = cat_frame
+
+        # カテゴリラベル
+        is_required = cat in REQUIRED_CATEGORIES
+        label_text = f"▼ {CATEGORY_LABELS_SHORT[cat]}"
+        ttk.Label(cat_frame, text=label_text, font=("", 9, "bold")).pack(anchor=tk.W)
+
+        # サムネイル行
+        thumb_frame = ttk.Frame(cat_frame)
+        thumb_frame.pack(fill=tk.X)
+
+        self.candidate_buttons[cat] = []
+
+        # もっと見るボタン
+        more_btn = ttk.Button(
+            thumb_frame, text="+", width=3,
+            command=lambda c=cat: self._load_more_candidates(c),
+            state=tk.DISABLED
+        )
+        more_btn.pack(side=tk.RIGHT, padx=2)
+        self.more_buttons[cat] = more_btn
 
     def _build_step3_ui(self):
         """STEP3: 出力UIを構築"""
         frame = self.step3_frame
 
-        # Settings frame
-        settings_frame = ttk.LabelFrame(frame, text="マスク設定", padding=10)
-        settings_frame.pack(fill=tk.X, pady=(0, 10))
+        # 上下分割
+        top_frame = ttk.Frame(frame)
+        top_frame.pack(fill=tk.X, pady=(0, 10))
+
+        # マスク設定
+        settings_frame = ttk.LabelFrame(top_frame, text="マスク設定", padding=5)
+        settings_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
 
         # Mask type
-        mask_type_frame = ttk.Frame(settings_frame)
-        mask_type_frame.pack(fill=tk.X, pady=2)
-
-        ttk.Label(mask_type_frame, text="マスク種類:").pack(side=tk.LEFT)
+        mask_row = ttk.Frame(settings_frame)
+        mask_row.pack(fill=tk.X, pady=2)
+        ttk.Label(mask_row, text="種類:").pack(side=tk.LEFT)
         self.mask_type_var = tk.StringVar(value="ellipse")
         ttk.Radiobutton(
-            mask_type_frame, text="楕円マスク", variable=self.mask_type_var,
+            mask_row, text="楕円", variable=self.mask_type_var,
             value="ellipse", command=self._on_mask_type_changed
-        ).pack(side=tk.LEFT, padx=(10, 5))
-        ttk.Radiobutton(
-            mask_type_frame, text="SAM3マスク", variable=self.mask_type_var,
-            value="sam3", command=self._on_mask_type_changed
         ).pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(
+            mask_row, text="SAM3", variable=self.mask_type_var,
+            value="sam3", command=self._on_mask_type_changed
+        ).pack(side=tk.LEFT)
 
-        # Feather (with inline description)
-        feather_frame = ttk.Frame(settings_frame)
-        feather_frame.pack(fill=tk.X, pady=2)
-
-        ttk.Label(feather_frame, text="フェザー:", width=10).pack(side=tk.LEFT)
+        # Feather
+        feather_row = ttk.Frame(settings_frame)
+        feather_row.pack(fill=tk.X, pady=2)
+        ttk.Label(feather_row, text="フェザー:").pack(side=tk.LEFT)
         self.feather_var = tk.IntVar(value=DEFAULT_FEATHER)
-        self.feather_slider = ttk.Scale(
-            feather_frame, from_=0, to=MAX_FEATHER, orient=tk.HORIZONTAL,
-            variable=self.feather_var,
-        )
-        self.feather_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
-        self.feather_label = ttk.Label(feather_frame, text=f"{DEFAULT_FEATHER}px", width=6)
+        ttk.Scale(
+            feather_row, from_=0, to=MAX_FEATHER, orient=tk.HORIZONTAL,
+            variable=self.feather_var, length=100
+        ).pack(side=tk.LEFT, padx=5)
+        self.feather_label = ttk.Label(feather_row, text=f"{DEFAULT_FEATHER}px", width=5)
         self.feather_label.pack(side=tk.LEFT)
-        ttk.Label(feather_frame, text="(境界ぼかし)", foreground="gray", font=("", 8)).pack(side=tk.LEFT, padx=5)
 
-        # Mask dilate (for SAM3 mask)
-        self.dilate_frame = ttk.Frame(settings_frame)
-        self.dilate_frame.pack(fill=tk.X, pady=2)
-
-        ttk.Label(self.dilate_frame, text="マスク膨張:", width=10).pack(side=tk.LEFT)
+        # Dilate
+        dilate_row = ttk.Frame(settings_frame)
+        dilate_row.pack(fill=tk.X, pady=2)
+        ttk.Label(dilate_row, text="膨張:").pack(side=tk.LEFT)
         self.dilate_var = tk.IntVar(value=DEFAULT_MASK_DILATE)
         self.dilate_slider = ttk.Scale(
-            self.dilate_frame, from_=-MAX_MASK_DILATE, to=MAX_MASK_DILATE, orient=tk.HORIZONTAL,
-            variable=self.dilate_var,
+            dilate_row, from_=-MAX_MASK_DILATE, to=MAX_MASK_DILATE, orient=tk.HORIZONTAL,
+            variable=self.dilate_var, length=100
         )
-        self.dilate_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
-        self.dilate_label = ttk.Label(self.dilate_frame, text="0px", width=6)
+        self.dilate_slider.pack(side=tk.LEFT, padx=5)
+        self.dilate_label = ttk.Label(dilate_row, text="0px", width=5)
         self.dilate_label.pack(side=tk.LEFT)
-        ttk.Label(self.dilate_frame, text="(SAM3時のみ)", foreground="gray", font=("", 8)).pack(side=tk.LEFT, padx=5)
+        self.dilate_slider.configure(state=tk.DISABLED)
 
-        # Fine-tuning
-        tuning_frame = ttk.LabelFrame(frame, text="位置の微調整（検出がずれている場合）", padding=5)
-        tuning_frame.pack(fill=tk.X, pady=(0, 5))
+        # 位置調整
+        tuning_frame = ttk.LabelFrame(top_frame, text="位置調整", padding=5)
+        tuning_frame.pack(side=tk.LEFT, fill=tk.Y)
 
         # Offset X
-        offset_x_frame = ttk.Frame(tuning_frame)
-        offset_x_frame.pack(fill=tk.X, pady=1)
-
-        ttk.Label(offset_x_frame, text="X:", width=3).pack(side=tk.LEFT)
+        ox_row = ttk.Frame(tuning_frame)
+        ox_row.pack(fill=tk.X, pady=1)
+        ttk.Label(ox_row, text="X:").pack(side=tk.LEFT)
         self.offset_x_var = tk.IntVar(value=DEFAULT_OFFSET_X)
-        self.offset_x_slider = ttk.Scale(
-            offset_x_frame, from_=-MAX_OFFSET, to=MAX_OFFSET, orient=tk.HORIZONTAL,
-            variable=self.offset_x_var,
-        )
-        self.offset_x_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
-        self.offset_x_label = ttk.Label(offset_x_frame, text="0px", width=6)
+        ttk.Scale(
+            ox_row, from_=-MAX_OFFSET, to=MAX_OFFSET, orient=tk.HORIZONTAL,
+            variable=self.offset_x_var, length=100
+        ).pack(side=tk.LEFT, padx=5)
+        self.offset_x_label = ttk.Label(ox_row, text="0px", width=5)
         self.offset_x_label.pack(side=tk.LEFT)
-        ttk.Label(offset_x_frame, text="(左右)", foreground="gray", font=("", 8)).pack(side=tk.LEFT, padx=5)
 
         # Offset Y
-        offset_y_frame = ttk.Frame(tuning_frame)
-        offset_y_frame.pack(fill=tk.X, pady=1)
-
-        ttk.Label(offset_y_frame, text="Y:", width=3).pack(side=tk.LEFT)
+        oy_row = ttk.Frame(tuning_frame)
+        oy_row.pack(fill=tk.X, pady=1)
+        ttk.Label(oy_row, text="Y:").pack(side=tk.LEFT)
         self.offset_y_var = tk.IntVar(value=DEFAULT_OFFSET_Y)
-        self.offset_y_slider = ttk.Scale(
-            offset_y_frame, from_=-MAX_OFFSET, to=MAX_OFFSET, orient=tk.HORIZONTAL,
-            variable=self.offset_y_var,
-        )
-        self.offset_y_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
-        self.offset_y_label = ttk.Label(offset_y_frame, text="0px", width=6)
+        ttk.Scale(
+            oy_row, from_=-MAX_OFFSET, to=MAX_OFFSET, orient=tk.HORIZONTAL,
+            variable=self.offset_y_var, length=100
+        ).pack(side=tk.LEFT, padx=5)
+        self.offset_y_label = ttk.Label(oy_row, text="0px", width=5)
         self.offset_y_label.pack(side=tk.LEFT)
-        ttk.Label(offset_y_frame, text="(上下)", foreground="gray", font=("", 8)).pack(side=tk.LEFT, padx=5)
 
         # Scale
-        scale_frame = ttk.Frame(tuning_frame)
-        scale_frame.pack(fill=tk.X, pady=1)
-
-        ttk.Label(scale_frame, text="倍率:", width=3).pack(side=tk.LEFT)
+        scale_row = ttk.Frame(tuning_frame)
+        scale_row.pack(fill=tk.X, pady=1)
+        ttk.Label(scale_row, text="倍率:").pack(side=tk.LEFT)
         self.scale_var = tk.DoubleVar(value=DEFAULT_SCALE)
-        self.scale_slider = ttk.Scale(
-            scale_frame, from_=MIN_SCALE, to=MAX_SCALE, orient=tk.HORIZONTAL,
-            variable=self.scale_var,
-        )
-        self.scale_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
-        self.scale_label = ttk.Label(scale_frame, text="100%", width=6)
+        ttk.Scale(
+            scale_row, from_=MIN_SCALE, to=MAX_SCALE, orient=tk.HORIZONTAL,
+            variable=self.scale_var, length=100
+        ).pack(side=tk.LEFT, padx=5)
+        self.scale_label = ttk.Label(scale_row, text="100%", width=5)
         self.scale_label.pack(side=tk.LEFT)
-        ttk.Label(scale_frame, text="(拡大/縮小)", foreground="gray", font=("", 8)).pack(side=tk.LEFT, padx=5)
 
-        # Preview button
-        preview_btn_frame = ttk.Frame(frame)
-        preview_btn_frame.pack(fill=tk.X, pady=(0, 10))
+        # ボタン
+        btn_frame = ttk.Frame(top_frame)
+        btn_frame.pack(side=tk.LEFT, padx=10)
 
-        self.preview_btn = ttk.Button(
-            preview_btn_frame, text="プレビュー更新", command=self._on_update_preview
-        )
-        self.preview_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 5))
+        ttk.Button(btn_frame, text="プレビュー更新", command=self._on_update_preview).pack(fill=tk.X, pady=2)
+        ttk.Button(btn_frame, text="リセット", command=self._reset_settings).pack(fill=tk.X, pady=2)
 
-        reset_btn = ttk.Button(
-            preview_btn_frame, text="リセット", command=self._reset_settings
-        )
-        reset_btn.pack(side=tk.LEFT, padx=(5, 0))
-
-        # Preview area
+        # プレビューエリア
         preview_frame = ttk.LabelFrame(frame, text="出力プレビュー", padding=10)
-        preview_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        preview_frame.pack(fill=tk.BOTH, expand=True)
 
         preview_inner = ttk.Frame(preview_frame)
         preview_inner.pack()
 
-        self.preview_labels: Dict[str, ttk.Label] = {}
-        self.preview_name_labels: Dict[str, ttk.Label] = {}
+        self.output_preview_labels: Dict[str, ttk.Label] = {}
+        self.output_preview_name_labels: Dict[str, ttk.Label] = {}
 
         for cat in MOUTH_CATEGORIES:
             col = ttk.Frame(preview_inner)
-            col.pack(side=tk.LEFT, padx=10)
+            col.pack(side=tk.LEFT, padx=15, pady=5)
 
             name_lbl = ttk.Label(col, text=f"[{cat}]", font=("", 9, "bold"))
             name_lbl.pack()
-            self.preview_name_labels[cat] = name_lbl
+            self.output_preview_name_labels[cat] = name_lbl
 
             img_lbl = ttk.Label(col, text="---")
             img_lbl.pack(pady=5)
-            self.preview_labels[cat] = img_lbl
+            self.output_preview_labels[cat] = img_lbl
 
-        # Output button
+        # 出力ボタン
         self.output_btn = ttk.Button(
             frame, text="PNG出力", command=self._on_output, state=tk.DISABLED
         )
         self.output_btn.pack(fill=tk.X, pady=10)
-
-        # 初期状態で膨張スライダーを無効化（楕円マスクがデフォルト）
-        self.dilate_slider.configure(state=tk.DISABLED)
 
     def _poll_logs(self):
         """ログキューをポーリング"""
@@ -577,7 +566,7 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
             except queue.Empty:
                 break
 
-        # Update labels
+        # ラベル更新
         padding_pct = int(self.padding_var.get() * 100)
         self.padding_label.configure(text=f"{padding_pct}%")
         self.feather_label.configure(text=f"{self.feather_var.get()}px")
@@ -624,7 +613,7 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         """動画を設定"""
         self.video_path = path
         self.video_label.configure(text=os.path.basename(path))
-        self.step1_btn.configure(state=tk.NORMAL)
+        self.analyze_btn.configure(state=tk.NORMAL)
         self.log(f"動画を選択: {path}")
 
     def _on_analyze(self):
@@ -632,11 +621,9 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         if not self.video_path or self.is_analyzing:
             return
 
-        # 状態をリセット
         self._reset_state()
-
         self.is_analyzing = True
-        self.step1_btn.configure(state=tk.DISABLED)
+        self.analyze_btn.configure(state=tk.DISABLED)
         self.progress_var.set(0)
 
         thread = threading.Thread(target=self._analyze_worker, daemon=True)
@@ -673,14 +660,14 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
                 self.log("エラー: 口が検出されませんでした")
                 return
 
-            # 5カテゴリに分類
+            # 多めに分類
             self.classified_frames = classify_mouth_frames(
                 self.extractor.mouth_frames,
                 self.extractor.cluster_mask,
-                candidates_per_category=CANDIDATES_PER_CATEGORY,
+                candidates_per_category=MAX_CANDIDATES_PER_CATEGORY,
             )
 
-            # 全候補リストを作成（カテゴリ横断選択用）
+            # 全候補リスト
             self.all_candidates = []
             seen_frames = set()
             for frames in self.classified_frames.values():
@@ -689,9 +676,9 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
                         self.all_candidates.append(mf)
                         seen_frames.add(mf.frame_idx)
 
-            self.log(f"分類完了: 各カテゴリ{CANDIDATES_PER_CATEGORY}件ずつ")
+            self.log(f"分類完了: {len(self.all_candidates)}件の候補")
 
-            # 統一サイズを計算
+            # 統一サイズ計算
             if self.all_candidates:
                 max_w = max(mf.width for mf in self.all_candidates)
                 max_h = max(mf.height for mf in self.all_candidates)
@@ -702,21 +689,29 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
                 self.log(f"統一サイズ: {self.unified_size}")
 
             # UIを更新
-            self.after(0, self._populate_step2)
-            self.after(0, lambda: self.notebook.select(1))
+            self.after(0, self._populate_candidates)
 
             self.progress_var.set(100)
-            self.log("解析完了 - STEP2で口を選択してください")
+            self.log("解析完了 - 候補を選択してください")
 
         except Exception as e:
             self.log(f"エラー: {e}")
             traceback.print_exc()
         finally:
             self.is_analyzing = False
-            self.after(0, lambda: self.step1_btn.configure(state=tk.NORMAL))
+            self.after(0, lambda: self.analyze_btn.configure(state=tk.NORMAL))
 
-    def _populate_step2(self):
-        """STEP2のUIを候補で埋める"""
+    def _clear_candidates_ui(self):
+        """候補UIをクリア"""
+        for cat in MOUTH_CATEGORIES:
+            # ボタンを削除
+            for btn in self.candidate_buttons[cat]:
+                btn.destroy()
+            self.candidate_buttons[cat] = []
+            self.more_buttons[cat].configure(state=tk.DISABLED)
+
+    def _populate_candidates(self):
+        """候補をUIに表示"""
         if not self.classified_frames or not self.unified_size:
             return
 
@@ -726,142 +721,146 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         self._thumb_images = []
 
         for cat in MOUTH_CATEGORIES:
-            frames = self.classified_frames.get(cat, [])
-            buttons = self.candidate_buttons[cat]
+            self._populate_category_candidates(cat, cap, unified_w, unified_h)
 
-            for i, btn in enumerate(buttons):
-                if i < len(frames):
-                    mf = frames[i]
+    def _populate_category_candidates(
+        self, cat: str, cap: cv2.VideoCapture, unified_w: int, unified_h: int
+    ):
+        """カテゴリの候補を表示"""
+        frames = self.classified_frames.get(cat, [])
+        shown_count = self.shown_candidates[cat]
 
-                    # サムネイル生成（統一サイズのquadで正規化して表示）
-                    # 口の中心座標から統一サイズのquadを作成
-                    unified_quad = center_to_quad(mf.center, unified_w, unified_h)
+        # 既存ボタンを削除
+        for btn in self.candidate_buttons[cat]:
+            btn.destroy()
+        self.candidate_buttons[cat] = []
 
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, float(mf.frame_idx))
-                    ok, frame = cap.read()
-                    if ok and frame is not None:
-                        # 統一サイズのquadを使用して正規化
-                        patch = warp_frame_to_norm(frame, unified_quad, unified_w, unified_h)
-                        photo = numpy_to_photoimage(patch, THUMB_SIZE, keep_aspect=False)
-                        if photo:
-                            self._thumb_images.append(photo)
-                            btn.configure(image=photo, text="", compound=tk.TOP)
+        # サムネイルフレーム取得
+        cat_frame = self.category_frames[cat]
+        thumb_frame = None
+        for child in cat_frame.winfo_children():
+            if isinstance(child, ttk.Frame):
+                thumb_frame = child
+                break
 
-                    # クリックイベント（どのカテゴリに割り当てるか選択可能）
-                    btn.configure(
-                        command=lambda c=cat, idx=i: self._on_candidate_click(c, idx)
-                    )
-                    btn.configure(state=tk.NORMAL)
-                else:
-                    btn.configure(state=tk.DISABLED, text="---", image="")
+        if thumb_frame is None:
+            return
 
-    def _on_candidate_click(self, source_category: str, index: int):
-        """候補がクリックされた - 全体プレビューを表示し、そこからカテゴリを選択"""
-        frames = self.classified_frames.get(source_category, [])
+        # ボタン作成
+        for i in range(min(shown_count, len(frames))):
+            mf = frames[i]
+
+            # 統一サイズのquadで正規化
+            unified_quad = center_to_quad(mf.center, unified_w, unified_h)
+
+            cap.set(cv2.CAP_PROP_POS_FRAMES, float(mf.frame_idx))
+            ok, frame = cap.read()
+
+            btn = ttk.Button(thumb_frame, text="", width=8)
+            btn.pack(side=tk.LEFT, padx=1, before=self.more_buttons[cat])
+
+            if ok and frame is not None:
+                patch = warp_frame_to_norm(frame, unified_quad, unified_w, unified_h)
+                photo = numpy_to_photoimage(patch, target_height=THUMB_HEIGHT)
+                if photo:
+                    self._thumb_images.append(photo)
+                    btn.configure(image=photo, compound=tk.TOP)
+
+            btn.configure(command=lambda c=cat, idx=i: self._on_candidate_click(c, idx))
+            self.candidate_buttons[cat].append(btn)
+
+        # もっと見るボタン
+        if len(frames) > shown_count:
+            self.more_buttons[cat].configure(state=tk.NORMAL)
+        else:
+            self.more_buttons[cat].configure(state=tk.DISABLED)
+
+        # 割り当て済み表示を更新
+        self._update_candidate_buttons_appearance()
+
+    def _load_more_candidates(self, cat: str):
+        """候補を追加ロード"""
+        self.shown_candidates[cat] = min(
+            self.shown_candidates[cat] + 5,
+            MAX_CANDIDATES_PER_CATEGORY
+        )
+
+        cap = self._get_video_capture()
+        unified_w, unified_h = self.unified_size
+        self._populate_category_candidates(cat, cap, unified_w, unified_h)
+        self.log(f"{cat}: {self.shown_candidates[cat]}件表示")
+
+    def _on_candidate_click(self, cat: str, index: int):
+        """候補クリック - プレビュー表示"""
+        frames = self.classified_frames.get(cat, [])
         if index >= len(frames):
             return
 
-        selected_mf = frames[index]
+        mf = frames[index]
+        self.current_preview_mf = mf
+        self._update_preview_panel(mf)
 
-        # 全体プレビューとカテゴリ選択を統合したダイアログを表示
-        self._show_full_frame_preview_with_category_selection(selected_mf)
+        # 割り当てボタンを有効化
+        for btn in self.assign_buttons.values():
+            btn.configure(state=tk.NORMAL)
 
-    def _show_full_frame_preview_with_category_selection(self, mf: MouthFrameInfo):
-        """フレーム全体をプレビュー表示し、カテゴリ選択も可能にする"""
+    def _update_preview_panel(self, mf: MouthFrameInfo):
+        """プレビューパネルを更新"""
         cap = self._get_video_capture()
         cap.set(cv2.CAP_PROP_POS_FRAMES, float(mf.frame_idx))
         ok, frame = cap.read()
 
         if not ok or frame is None:
-            messagebox.showerror("エラー", "フレームを読み込めませんでした")
             return
 
-        # 統一サイズのquadを使用（すべてのフレームで同じサイズ）
         unified_w, unified_h = self.unified_size
         unified_quad = center_to_quad(mf.center, unified_w, unified_h)
 
-        # 口の位置を矩形で描画（統一サイズのquad）
+        # 口の位置を矩形で描画
         frame_draw = frame.copy()
         quad_int = unified_quad.astype(np.int32)
         cv2.polylines(frame_draw, [quad_int], isClosed=True, color=(0, 255, 0), thickness=2)
 
-        # プレビューウィンドウ
-        preview_win = tk.Toplevel(self)
-        preview_win.title(f"フレーム {mf.frame_idx} - カテゴリを選択")
-        preview_win.transient(self)
-        preview_win.grab_set()
-
-        # 画面サイズに合わせてリサイズ
-        h, w = frame_draw.shape[:2]
-        max_size = 500
-        scale = min(max_size / w, max_size / h, 1.0)
-        if scale < 1.0:
-            new_w, new_h = int(w * scale), int(h * scale)
-            frame_draw = cv2.resize(frame_draw, (new_w, new_h))
-
-        # 画像表示
-        photo = numpy_to_photoimage(frame_draw, frame_draw.shape[1])
+        photo = numpy_to_photoimage(frame_draw, max_size=PREVIEW_MAX_SIZE)
         if photo:
-            self._full_preview_photo = photo  # GC防止
-            lbl = ttk.Label(preview_win, image=photo)
-            lbl.pack(pady=5)
+            self._preview_photo = photo
+            self.preview_label.configure(image=photo, text="")
 
-        # 情報表示
-        ttk.Label(
-            preview_win,
-            text=f"元カテゴリ: {mf.category} | 統一サイズ: {unified_w}x{unified_h}",
-            foreground="gray"
-        ).pack()
-
-        # カテゴリ選択ボタン
-        ttk.Label(
-            preview_win,
-            text="このフレームをどのカテゴリに割り当てますか？",
-            font=("", 10, "bold")
-        ).pack(pady=(10, 5))
-
-        btn_frame = ttk.Frame(preview_win)
-        btn_frame.pack(pady=5)
-
-        for cat in MOUTH_CATEGORIES:
-            is_required = cat in REQUIRED_CATEGORIES
-            label = f"{cat.upper()}" + (" [必須]" if is_required else "")
-
-            btn = ttk.Button(
-                btn_frame, text=label, width=12,
-                command=lambda c=cat: self._assign_to_category(mf, c, preview_win)
-            )
-            btn.pack(side=tk.LEFT, padx=3)
-
-        ttk.Button(preview_win, text="キャンセル", command=preview_win.destroy).pack(pady=10)
-
-    def _assign_to_category(self, mf: MouthFrameInfo, category: str, dialog: tk.Toplevel):
-        """フレームをカテゴリに割り当て"""
-        self.selected_frames[category] = mf
-        # 元のカテゴリ（どこから選んだか）を表示
-        source_cat = mf.category if mf.category else "?"
-        self.selection_labels[category].configure(
-            text=f"選択中: フレーム {mf.frame_idx} (元: {source_cat})",
-            foreground="green"
+        self.preview_info_label.configure(
+            text=f"フレーム {mf.frame_idx} | 元カテゴリ: {mf.category} | サイズ: {unified_w}x{unified_h}"
         )
-        self.log(f"{category}: フレーム {mf.frame_idx} を選択 (元カテゴリ: {source_cat})")
 
-        dialog.destroy()
+    def _clear_preview_panel(self):
+        """プレビューパネルをクリア"""
+        self.preview_label.configure(image="", text="候補をクリックしてプレビュー")
+        self.preview_info_label.configure(text="")
+        self.current_preview_mf = None
+        self._preview_photo = None
 
-        # 候補ボタンの表示を更新（割り当て済みカテゴリを表示）
+        for btn in self.assign_buttons.values():
+            btn.configure(state=tk.DISABLED)
+
+    def _assign_current_to_category(self, category: str):
+        """現在プレビュー中のフレームをカテゴリに割り当て"""
+        if self.current_preview_mf is None:
+            return
+
+        mf = self.current_preview_mf
+        self.selected_frames[category] = mf
+
+        source_cat = mf.category if mf.category else "?"
+        self.log(f"{category}: フレーム {mf.frame_idx} を選択 (元: {source_cat})")
+
         self._update_candidate_buttons_appearance()
-
-        self._check_step2_complete()
+        self._update_selection_status()
 
     def _update_candidate_buttons_appearance(self):
-        """候補ボタンの見た目を更新（割り当て済みカテゴリを表示）"""
-        # どのフレームがどのカテゴリに割り当てられているかをマップ
+        """候補ボタンの見た目を更新"""
         frame_to_assigned_cat: Dict[int, str] = {}
         for cat, mf in self.selected_frames.items():
             if mf is not None:
                 frame_to_assigned_cat[mf.frame_idx] = cat
 
-        # 各カテゴリの候補ボタンを更新
         for cat in MOUTH_CATEGORIES:
             frames = self.classified_frames.get(cat, [])
             buttons = self.candidate_buttons[cat]
@@ -872,41 +871,44 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
                     assigned_cat = frame_to_assigned_cat.get(mf.frame_idx)
 
                     if assigned_cat:
-                        # このフレームは何かのカテゴリに割り当て済み
                         btn.configure(text=f"→{assigned_cat.upper()}", compound=tk.BOTTOM)
                     else:
-                        # 未割り当て
                         btn.configure(text="", compound=tk.TOP)
 
-    def _clear_selection(self, category: str):
-        """カテゴリの選択を解除"""
-        self.selected_frames[category] = None
-        self.selection_labels[category].configure(text="未選択", foreground="gray")
-        self.log(f"{category}: 選択を解除")
+    def _update_selection_status(self):
+        """選択状況を更新"""
+        for cat in MOUTH_CATEGORIES:
+            mf = self.selected_frames.get(cat)
+            if mf:
+                source_cat = mf.category if mf.category else "?"
+                self.status_labels[cat].configure(
+                    text=f"フレーム {mf.frame_idx} (元: {source_cat})",
+                    foreground="green"
+                )
+            else:
+                self.status_labels[cat].configure(text="未選択", foreground="gray")
 
-        # 候補ボタンの表示を更新
-        self._update_candidate_buttons_appearance()
-
-        self._check_step2_complete()
-
-    def _check_step2_complete(self):
-        """STEP2の必須項目が選択されているかチェック"""
+        # STEP3ボタンの状態
         required_complete = all(
             self.selected_frames[cat] is not None
             for cat in REQUIRED_CATEGORIES
         )
 
         if required_complete:
-            self.step2_btn.configure(
-                state=tk.NORMAL,
-                text="STEP3へ進む"
-            )
+            self.goto_step3_btn.configure(state=tk.NORMAL, text="STEP3へ進む")
         else:
             missing = [cat for cat in REQUIRED_CATEGORIES if self.selected_frames[cat] is None]
-            self.step2_btn.configure(
+            self.goto_step3_btn.configure(
                 state=tk.DISABLED,
-                text=f"STEP3へ進む（{', '.join(missing)} を選択してください）"
+                text=f"STEP3へ進む（{', '.join(missing)} を選択）"
             )
+
+    def _clear_selection(self, category: str):
+        """カテゴリの選択を解除"""
+        self.selected_frames[category] = None
+        self.log(f"{category}: 選択を解除")
+        self._update_candidate_buttons_appearance()
+        self._update_selection_status()
 
     def _goto_step3(self):
         """STEP3へ進む"""
@@ -920,13 +922,12 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
             messagebox.showwarning("警告", f"必須項目を選択してください: {', '.join(missing)}")
             return
 
-        self.notebook.select(2)
+        self.notebook.select(1)
         self._on_update_preview()
 
     def _on_mask_type_changed(self):
         """マスク種類が変更された"""
-        mask_type = self.mask_type_var.get()
-        if mask_type == "sam3":
+        if self.mask_type_var.get() == "sam3":
             self.dilate_slider.configure(state=tk.NORMAL)
         else:
             self.dilate_slider.configure(state=tk.DISABLED)
@@ -939,8 +940,8 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         self.offset_y_var.set(DEFAULT_OFFSET_Y)
         self.scale_var.set(DEFAULT_SCALE)
         self.mask_type_var.set("ellipse")
-        self._on_mask_type_changed()  # 膨張スライダーの状態を更新
-        self.log("設定をリセットしました")
+        self._on_mask_type_changed()
+        self.log("設定をリセット")
 
     def _get_video_capture(self) -> cv2.VideoCapture:
         """キャッシュされたVideoCaptureを取得"""
@@ -949,16 +950,14 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         return self._cached_cap
 
     def _on_update_preview(self):
-        """プレビュー更新"""
+        """出力プレビュー更新"""
         if not self.unified_size:
             return
 
-        # 必須カテゴリがすべて選択されているかチェック
         required_complete = all(
             self.selected_frames[cat] is not None
             for cat in REQUIRED_CATEGORIES
         )
-
         if not required_complete:
             return
 
@@ -977,8 +976,7 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         for cat in MOUTH_CATEGORIES:
             mf = self.selected_frames.get(cat)
             if mf is None:
-                # 未選択のカテゴリは「---」表示
-                self.preview_labels[cat].configure(image="", text="---")
+                self.output_preview_labels[cat].configure(image="", text="---")
                 continue
 
             cap.set(cv2.CAP_PROP_POS_FRAMES, float(mf.frame_idx))
@@ -986,7 +984,6 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
             if not ok or frame is None:
                 continue
 
-            # 統一サイズのquadを使用（口の中心から作成）
             unified_quad = center_to_quad(mf.center, unified_w, unified_h)
             adjusted_quad = adjust_quad(unified_quad, offset_x, offset_y, scale)
 
@@ -1001,13 +998,13 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
             self.preview_sprites[cat] = bgra
 
             composited = composite_on_checkerboard(bgra)
-            photo = numpy_to_photoimage(composited, PREVIEW_SIZE)
+            photo = numpy_to_photoimage(composited, target_height=80)
             if photo:
                 self.preview_images[cat] = photo
-                self.preview_labels[cat].configure(image=photo, text="")
+                self.output_preview_labels[cat].configure(image=photo, text="")
 
         self.output_btn.configure(state=tk.NORMAL)
-        self.log(f"プレビュー更新完了 ({len(self.preview_sprites)}枚)")
+        self.log(f"プレビュー更新 ({len(self.preview_sprites)}枚)")
 
     def _on_output(self):
         """PNG出力"""
