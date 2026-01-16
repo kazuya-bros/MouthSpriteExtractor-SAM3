@@ -85,6 +85,35 @@ def quad_wh(quad: np.ndarray) -> Tuple[float, float]:
     return w, h
 
 
+def center_to_quad(center: np.ndarray, width: float, height: float) -> np.ndarray:
+    """
+    中心座標と幅・高さからquadを生成する。
+
+    すべてのフレームで統一サイズのquadを使用するために、
+    各フレームの口中心から統一サイズのquadを作成する。
+
+    Args:
+        center: (2,) float32 - 口の中心座標 (x, y)
+        width: quadの幅
+        height: quadの高さ
+
+    Returns:
+        quad: (4, 2) float32 - 左上、右上、右下、左下の順
+    """
+    cx, cy = float(center[0]), float(center[1])
+    half_w = width / 2.0
+    half_h = height / 2.0
+
+    quad = np.array([
+        [cx - half_w, cy - half_h],  # 左上
+        [cx + half_w, cy - half_h],  # 右上
+        [cx + half_w, cy + half_h],  # 右下
+        [cx - half_w, cy + half_h],  # 左下
+    ], dtype=np.float32)
+
+    return quad
+
+
 def ensure_even_ge2(n: int) -> int:
     """偶数に丸める（最小2）"""
     n = int(n)

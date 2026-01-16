@@ -55,6 +55,7 @@ from mouth_sprite_extractor import (
     extract_mouth_sprite,
     adjust_quad,
     classify_mouth_frames,
+    center_to_quad,
 )
 
 
@@ -732,12 +733,15 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
                 if i < len(frames):
                     mf = frames[i]
 
-                    # サムネイル生成（統一サイズで正規化してから表示）
+                    # サムネイル生成（統一サイズのquadで正規化して表示）
+                    # 口の中心座標から統一サイズのquadを作成
+                    unified_quad = center_to_quad(mf.center, unified_w, unified_h)
+
                     cap.set(cv2.CAP_PROP_POS_FRAMES, float(mf.frame_idx))
                     ok, frame = cap.read()
                     if ok and frame is not None:
-                        # 統一サイズに正規化
-                        patch = warp_frame_to_norm(frame, mf.quad, unified_w, unified_h)
+                        # 統一サイズのquadを使用して正規化
+                        patch = warp_frame_to_norm(frame, unified_quad, unified_w, unified_h)
                         photo = numpy_to_photoimage(patch, THUMB_SIZE, keep_aspect=False)
                         if photo:
                             self._thumb_images.append(photo)
@@ -752,47 +756,18 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
                     btn.configure(state=tk.DISABLED, text="---", image="")
 
     def _on_candidate_click(self, source_category: str, index: int):
-        """候補がクリックされた - 割り当て先カテゴリを選択するダイアログを表示"""
+        """候補がクリックされた - 全体プレビューを表示し、そこからカテゴリを選択"""
         frames = self.classified_frames.get(source_category, [])
         if index >= len(frames):
             return
 
         selected_mf = frames[index]
 
-        # 簡易的なカテゴリ選択ダイアログ
-        dialog = tk.Toplevel(self)
-        dialog.title("割り当て先を選択")
-        dialog.geometry("320x320")
-        dialog.transient(self)
-        dialog.grab_set()
+        # 全体プレビューとカテゴリ選択を統合したダイアログを表示
+        self._show_full_frame_preview_with_category_selection(selected_mf)
 
-        ttk.Label(
-            dialog,
-            text=f"フレーム {selected_mf.frame_idx} を\nどのカテゴリに割り当てますか？",
-            justify=tk.CENTER
-        ).pack(pady=10)
-
-        for cat in MOUTH_CATEGORIES:
-            is_required = cat in REQUIRED_CATEGORIES
-            label = f"{cat.upper()}" + (" [必須]" if is_required else " [任意]")
-
-            btn = ttk.Button(
-                dialog, text=label,
-                command=lambda c=cat: self._assign_to_category(selected_mf, c, dialog)
-            )
-            btn.pack(fill=tk.X, padx=20, pady=2)
-
-        # 全体プレビューボタン
-        ttk.Separator(dialog, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=5)
-        ttk.Button(
-            dialog, text="全体フレームを表示",
-            command=lambda: self._show_full_frame_preview(selected_mf)
-        ).pack(fill=tk.X, padx=20, pady=2)
-
-        ttk.Button(dialog, text="キャンセル", command=dialog.destroy).pack(pady=10)
-
-    def _show_full_frame_preview(self, mf: MouthFrameInfo):
-        """フレーム全体をプレビュー表示"""
+    def _show_full_frame_preview_with_category_selection(self, mf: MouthFrameInfo):
+        """フレーム全体をプレビュー表示し、カテゴリ選択も可能にする"""
         cap = self._get_video_capture()
         cap.set(cv2.CAP_PROP_POS_FRAMES, float(mf.frame_idx))
         ok, frame = cap.read()
@@ -801,37 +776,64 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
             messagebox.showerror("エラー", "フレームを読み込めませんでした")
             return
 
-        # 口の位置を矩形で描画
+        # 統一サイズのquadを使用（すべてのフレームで同じサイズ）
+        unified_w, unified_h = self.unified_size
+        unified_quad = center_to_quad(mf.center, unified_w, unified_h)
+
+        # 口の位置を矩形で描画（統一サイズのquad）
         frame_draw = frame.copy()
-        quad = mf.quad.astype(np.int32)
-        cv2.polylines(frame_draw, [quad], isClosed=True, color=(0, 255, 0), thickness=2)
+        quad_int = unified_quad.astype(np.int32)
+        cv2.polylines(frame_draw, [quad_int], isClosed=True, color=(0, 255, 0), thickness=2)
 
         # プレビューウィンドウ
         preview_win = tk.Toplevel(self)
-        preview_win.title(f"フレーム {mf.frame_idx} - 全体プレビュー")
+        preview_win.title(f"フレーム {mf.frame_idx} - カテゴリを選択")
+        preview_win.transient(self)
+        preview_win.grab_set()
 
         # 画面サイズに合わせてリサイズ
         h, w = frame_draw.shape[:2]
-        max_size = 600
+        max_size = 500
         scale = min(max_size / w, max_size / h, 1.0)
         if scale < 1.0:
             new_w, new_h = int(w * scale), int(h * scale)
             frame_draw = cv2.resize(frame_draw, (new_w, new_h))
-
-        preview_win.geometry(f"{frame_draw.shape[1]}x{frame_draw.shape[0] + 30}")
 
         # 画像表示
         photo = numpy_to_photoimage(frame_draw, frame_draw.shape[1])
         if photo:
             self._full_preview_photo = photo  # GC防止
             lbl = ttk.Label(preview_win, image=photo)
-            lbl.pack()
+            lbl.pack(pady=5)
 
+        # 情報表示
         ttk.Label(
             preview_win,
-            text=f"カテゴリ: {mf.category} | サイズ: {mf.width:.0f}x{mf.height:.0f}",
+            text=f"元カテゴリ: {mf.category} | 統一サイズ: {unified_w}x{unified_h}",
             foreground="gray"
         ).pack()
+
+        # カテゴリ選択ボタン
+        ttk.Label(
+            preview_win,
+            text="このフレームをどのカテゴリに割り当てますか？",
+            font=("", 10, "bold")
+        ).pack(pady=(10, 5))
+
+        btn_frame = ttk.Frame(preview_win)
+        btn_frame.pack(pady=5)
+
+        for cat in MOUTH_CATEGORIES:
+            is_required = cat in REQUIRED_CATEGORIES
+            label = f"{cat.upper()}" + (" [必須]" if is_required else "")
+
+            btn = ttk.Button(
+                btn_frame, text=label, width=12,
+                command=lambda c=cat: self._assign_to_category(mf, c, preview_win)
+            )
+            btn.pack(side=tk.LEFT, padx=3)
+
+        ttk.Button(preview_win, text="キャンセル", command=preview_win.destroy).pack(pady=10)
 
     def _assign_to_category(self, mf: MouthFrameInfo, category: str, dialog: tk.Toplevel):
         """フレームをカテゴリに割り当て"""
@@ -845,13 +847,46 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
         self.log(f"{category}: フレーム {mf.frame_idx} を選択 (元カテゴリ: {source_cat})")
 
         dialog.destroy()
+
+        # 候補ボタンの表示を更新（割り当て済みカテゴリを表示）
+        self._update_candidate_buttons_appearance()
+
         self._check_step2_complete()
+
+    def _update_candidate_buttons_appearance(self):
+        """候補ボタンの見た目を更新（割り当て済みカテゴリを表示）"""
+        # どのフレームがどのカテゴリに割り当てられているかをマップ
+        frame_to_assigned_cat: Dict[int, str] = {}
+        for cat, mf in self.selected_frames.items():
+            if mf is not None:
+                frame_to_assigned_cat[mf.frame_idx] = cat
+
+        # 各カテゴリの候補ボタンを更新
+        for cat in MOUTH_CATEGORIES:
+            frames = self.classified_frames.get(cat, [])
+            buttons = self.candidate_buttons[cat]
+
+            for i, btn in enumerate(buttons):
+                if i < len(frames):
+                    mf = frames[i]
+                    assigned_cat = frame_to_assigned_cat.get(mf.frame_idx)
+
+                    if assigned_cat:
+                        # このフレームは何かのカテゴリに割り当て済み
+                        btn.configure(text=f"→{assigned_cat.upper()}", compound=tk.BOTTOM)
+                    else:
+                        # 未割り当て
+                        btn.configure(text="", compound=tk.TOP)
 
     def _clear_selection(self, category: str):
         """カテゴリの選択を解除"""
         self.selected_frames[category] = None
         self.selection_labels[category].configure(text="未選択", foreground="gray")
         self.log(f"{category}: 選択を解除")
+
+        # 候補ボタンの表示を更新
+        self._update_candidate_buttons_appearance()
+
         self._check_step2_complete()
 
     def _check_step2_complete(self):
@@ -951,7 +986,9 @@ class MouthSpriteExtractorApp(TkinterDnD.Tk if _HAS_TK_DND else tk.Tk):
             if not ok or frame is None:
                 continue
 
-            adjusted_quad = adjust_quad(mf.quad, offset_x, offset_y, scale)
+            # 統一サイズのquadを使用（口の中心から作成）
+            unified_quad = center_to_quad(mf.center, unified_w, unified_h)
+            adjusted_quad = adjust_quad(unified_quad, offset_x, offset_y, scale)
 
             bgra = extract_mouth_sprite(
                 frame, adjusted_quad, unified_w, unified_h,
