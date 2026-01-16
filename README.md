@@ -26,6 +26,14 @@ SAM3 (Segment Anything Model 3) を使用して、動画から口スプライト
 - **MotionPNGTuber互換**の正方形スプライト出力
 - GUIで直感的に操作可能
 
+## スクリーンショット
+
+### STEP1: 抽出・選択
+![STEP1: 抽出・選択](docs/images/step1_select.png)
+
+### STEP2: 出力
+![STEP2: 出力](docs/images/step2_output.png)
+
 ## 必要環境
 
 - Python 3.12以上
