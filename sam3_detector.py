@@ -39,24 +39,6 @@ if _TORCH_AVAILABLE:
         _SAM3_ERROR = str(e)
 
 
-def _test_cuda_actually_works() -> bool:
-    """CUDAが実際に動作するかテストする（互換性のないGPUを検出）"""
-    if not _TORCH_AVAILABLE:
-        return False
-    if not torch.cuda.is_available():
-        return False
-    try:
-        # 小さなテンソルでCUDA演算をテスト
-        test_tensor = torch.zeros(1, device="cuda")
-        _ = test_tensor + 1
-        del test_tensor
-        torch.cuda.empty_cache()
-        return True
-    except Exception as e:
-        print(f"[SAM3] CUDA test failed: {e}")
-        return False
-
-
 def is_sam3_available() -> Tuple[bool, str]:
     """SAM3が利用可能かチェック
 
@@ -79,49 +61,27 @@ class SAM3MouthDetector:
             raise RuntimeError(f"SAM3 is not available: {_SAM3_ERROR}")
 
         if device == "auto":
-            # CUDAが利用可能かつ実際に動作するかテスト
-            if torch.cuda.is_available() and _test_cuda_actually_works():
-                device = "cuda"
-            else:
-                device = "cpu"
-                if torch.cuda.is_available():
-                    print("[SAM3] CUDA is available but not compatible with this GPU, using CPU")
+            device = "cuda" if torch.cuda.is_available() else "cpu"
 
         self.device = device
         self.confidence_threshold = confidence_threshold
-        self._fallback_to_cpu = False
 
         print(f"[SAM3] Loading model on {device}...")
         print("[SAM3] Note: First run will download model from HuggingFace (requires access approval)")
 
         # Ultralytics SAM3 Predictorを初期化
-        self.predictor = self._create_predictor(device)
-        self._current_image = None
-
-        print("[SAM3] Model loaded successfully")
-
-    def _create_predictor(self, device: str):
-        """Predictorを作成"""
         overrides = dict(
-            conf=self.confidence_threshold,
+            conf=confidence_threshold,
             task="segment",
             mode="predict",
             model="sam3.pt",
             device=device,
             verbose=False,
         )
-        return SAM3SemanticPredictor(overrides=overrides)
+        self.predictor = SAM3SemanticPredictor(overrides=overrides)
+        self._current_image = None
 
-    def _reinit_on_cpu(self):
-        """CPUでPredictorを再初期化"""
-        if self.device == "cpu":
-            return False
-        print("[SAM3] CUDA error detected, falling back to CPU...")
-        self.device = "cpu"
-        self._fallback_to_cpu = True
-        self.predictor = self._create_predictor("cpu")
-        print("[SAM3] Model reloaded on CPU")
-        return True
+        print("[SAM3] Model loaded successfully")
 
     def detect_mouth(
         self,
@@ -224,13 +184,7 @@ class SAM3MouthDetector:
 
             return mask_u8, (x_min, y_min, x_max, y_max), (cx, cy)
 
-        except (RuntimeError, Exception) as e:
-            error_str = str(e)
-            # CUDAエラーの場合、CPUにフォールバックしてリトライ
-            if "CUDA" in error_str or "cuda" in error_str:
-                if self._reinit_on_cpu():
-                    # CPUで再試行
-                    return self.detect_mouth(image, prompt, padding_ratio, padding_px)
+        except Exception as e:
             print(f"[SAM3] Detection error: {e}")
             import traceback
             traceback.print_exc()
